@@ -4,6 +4,8 @@ CLI tool to review **context used by AI coding agents** — files and line range
 
 Supports **Cursor IDE** (`--cursor`) and **Claude Code** (`--claude`).
 
+![Context tree output with read counts and line ranges](assets/example.png)
+
 ## Install
 
 ```bash
