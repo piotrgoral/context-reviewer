@@ -6,11 +6,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
 from context_reviewer.context.models import FileContextUsage
-from context_reviewer.render.activity import format_file_detail, style_activity_suffix
+from context_reviewer.render.activity import format_file_detail, style_activity_suffix, style_file_detail
 from context_reviewer.render.terminal import ansi, style_tree_prefix
-
-_ANSI_GREEN = "92"
-_ANSI_ORANGE = "38;5;208"
 
 
 @dataclass
@@ -82,14 +79,6 @@ def _format_tree_entry(
             name = ansi("36", f"{name}/")
         else:
             name = ansi("1", name)
-            if detail == "✓":
-                detail = ansi(_ANSI_GREEN, detail)
-            elif detail == "edited":
-                detail = ansi(_ANSI_ORANGE, detail)
-            elif detail == "deleted":
-                detail = ansi("35", detail)
-            elif detail:
-                detail = ansi(_ANSI_GREEN, detail)
     elif is_dir:
         name = f"{name}/"
 
@@ -176,7 +165,10 @@ def _render_context_tree(
             )
             continue
 
-        detail = format_file_detail(value)
+        if color:
+            detail = style_file_detail(value, color=True)
+        else:
+            detail = format_file_detail(value)
         if not detail:
             continue
         lines.append(

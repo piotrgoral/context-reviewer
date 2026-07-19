@@ -9,8 +9,14 @@ from typing import Dict, Optional, Set
 @dataclass
 class FileContextUsage:
     lines: Set[int] = field(default_factory=set)
+    read_lines: Set[int] = field(default_factory=set)
+    search_lines: Set[int] = field(default_factory=set)
+    code_search_lines: Set[int] = field(default_factory=set)
     full_file: bool = False
     hits: int = 0
+    read_hits: int = 0
+    search_hits: int = 0
+    code_search_hits: int = 0
     last_bubble_index: Optional[int] = None
     edit_hits: int = 0
     last_edit_bubble_index: Optional[int] = None

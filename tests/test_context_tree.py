@@ -381,7 +381,7 @@ class TestCollectContextUsage(unittest.TestCase):
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         output = format_context_tree(usage, total_bubbles=len(messages))
         self.assertIn("pyproject.toml [1 read] [· · ·    ] — L1-L30", output)
-        self.assertIn("README.md [1 read] [· · · · ·] —", output)
+        self.assertIn("README.md [1 search] [· · · · ·] —", output)
         for line in (35, 36, 498, 646, 647, 727, 770):
             self.assertIn(f"L{line}", output)
         self.assertNotIn("glob_file_search", output)
@@ -425,6 +425,7 @@ class TestCollectContextUsage(unittest.TestCase):
         self.assertEqual(usage["module.py"].lines, set(range(1, 11)) | set(range(20, 25)))
         self.assertEqual(usage["module.py"].last_bubble_index, 1)
         self.assertEqual(usage["module.py"].hits, 2)
+        self.assertEqual(usage["module.py"].read_hits, 2)
 
     def test_full_file_overrides_partial(self):
         messages = [
@@ -565,6 +566,8 @@ class TestCollectContextUsage(unittest.TestCase):
         ]
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         self.assertEqual(usage["src/handler.py"].lines, {10, 12})
+        self.assertEqual(usage["src/handler.py"].code_search_hits, 1)
+        self.assertEqual(usage["src/handler.py"].read_hits, 0)
 
     def test_skips_non_completed_tools(self):
         messages = [
@@ -965,9 +968,9 @@ class TestFormatContextWorktree(unittest.TestCase):
         )
         self.assertIn("\033[1m", output)
         self.assertIn("\033[36m", output)
-        self.assertIn("\033[33m", output)
         self.assertIn("\033[38;5;208m", output)
         self.assertIn("\033[92m", output)
+        self.assertNotIn("\033[33m", output)
         self.assertIn("README.md", output)
         self.assertIn("L1-L2", output)
         self.assertIn("[1 edit]", output)
@@ -1015,7 +1018,39 @@ class TestFormatContextWorktree(unittest.TestCase):
         ]
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         self.assertEqual(usage["file.py"].hits, 2)
+        self.assertEqual(usage["file.py"].read_hits, 2)
         self.assertEqual(usage["file.py"].last_bubble_index, 1)
+
+    def test_color_uses_distinct_greens_per_read_type(self):
+        output = format_context_tree(
+            {
+                "read.py": FileContextUsage(
+                    lines={1, 2},
+                    hits=1,
+                    read_hits=1,
+                    read_lines={1, 2},
+                ),
+                "search.py": FileContextUsage(
+                    lines={10},
+                    hits=1,
+                    search_hits=1,
+                    search_lines={10},
+                ),
+                "semantic.py": FileContextUsage(
+                    lines={20},
+                    hits=1,
+                    code_search_hits=1,
+                    code_search_lines={20},
+                ),
+            },
+            color=True,
+        )
+        self.assertIn("\033[92m[1 read]\033[0m", output)
+        self.assertIn("\033[32m[1 search]\033[0m", output)
+        self.assertIn("\033[38;5;77m[1 code search]\033[0m", output)
+        self.assertIn("\033[92mL1-L2\033[0m", output)
+        self.assertIn("\033[32mL10\033[0m", output)
+        self.assertIn("\033[38;5;77mL20\033[0m", output)
 
 if __name__ == "__main__":
     unittest.main()

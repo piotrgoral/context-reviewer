@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+
+ContextReadKind = Literal["read", "search", "code_search"]
 
 from context_reviewer.context.models import FileContextUsage
 
@@ -328,12 +330,21 @@ def _merge_edit_usage(
         existing.deleted = True
 
 
+def _clear_line_sets(usage: FileContextUsage) -> None:
+    usage.lines.clear()
+    usage.read_lines.clear()
+    usage.search_lines.clear()
+    usage.code_search_lines.clear()
+
+
 def _merge_usage(
     target: Dict[str, FileContextUsage],
     file_path: str,
     usage: FileContextUsage,
     project_root: Optional[str],
     bubble_index: int,
+    *,
+    read_kind: ContextReadKind,
 ) -> None:
     rel_path = _normalize_path(file_path, project_root)
     if not rel_path:
@@ -350,15 +361,27 @@ def _merge_usage(
 
     existing = target.setdefault(rel_path, FileContextUsage())
     existing.hits += 1
+    if read_kind == "read":
+        existing.read_hits += 1
+    elif read_kind == "search":
+        existing.search_hits += 1
+    else:
+        existing.code_search_hits += 1
     if existing.last_bubble_index is None:
         existing.last_bubble_index = bubble_index
     else:
         existing.last_bubble_index = max(existing.last_bubble_index, bubble_index)
     if usage.full_file:
         existing.full_file = True
-        existing.lines.clear()
+        _clear_line_sets(existing)
     elif not existing.full_file:
         existing.lines.update(usage.lines)
+        if read_kind == "read":
+            existing.read_lines.update(usage.lines)
+        elif read_kind == "search":
+            existing.search_lines.update(usage.lines)
+        else:
+            existing.code_search_lines.update(usage.lines)
 
 
 def collect_context_usage(
@@ -408,9 +431,14 @@ def collect_context_usage(
                     usage,
                     project_root,
                     bubble_index,
+                    read_kind="read",
                 )
             continue
 
+        if tool_name in CODE_SEARCH_TOOL_NAMES:
+            read_kind: ContextReadKind = "code_search"
+        else:
+            read_kind = "search"
         for file_path, usage in extract_search_context(tool_data):
             _merge_usage(
                 usage_by_file,
@@ -418,6 +446,7 @@ def collect_context_usage(
                 usage,
                 project_root,
                 bubble_index,
+                read_kind=read_kind,
             )
 
     return usage_by_file
