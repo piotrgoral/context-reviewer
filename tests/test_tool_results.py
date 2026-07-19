@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from context_reviewer.tool_results import (
+from context_reviewer.agents.cursor.tool_results import (
     extract_code_search_matches,
     extract_line_matches_from_binary,
     extract_matches_from_code_results,

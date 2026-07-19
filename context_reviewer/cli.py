@@ -8,8 +8,9 @@ import sys
 from datetime import datetime
 from typing import Optional
 
+from context_reviewer.agents.cursor.context import build_context_tree
 from context_reviewer.agents.cursor.viewer import CursorChatViewer
-from context_reviewer.context_tree import build_context_tree, format_context_tree
+from context_reviewer.render import format_context_tree
 
 
 def parse_date(date_str: str) -> datetime:

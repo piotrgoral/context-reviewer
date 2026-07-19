@@ -71,8 +71,8 @@ pytest
 
 This project is a **combined work** under AGPL-3.0:
 
-- **From [cursor-chronicle](https://github.com/cursor-chronicle/cursor-chronicle) (main):** Cursor DB access in `context_reviewer/agents/cursor/` — see [NOTICE](NOTICE).
-- **Original to context-reviewer:** context tree, tool-result extraction, and CLI in `context_reviewer/context_tree.py`, `extractor.py`, `tool_results.py`, and `cli.py`.
+- **From [cursor-chronicle](https://github.com/cursor-chronicle/cursor-chronicle) (main):** Cursor DB access in `context_reviewer/agents/cursor/` (messages, utils, viewer) — see [NOTICE](NOTICE).
+- **Original to context-reviewer:** domain models in `context/`, terminal rendering in `render/`, Cursor context extraction in `agents/cursor/` (tool_results, extractor, context), and CLI in `cli.py`.
 
 ## License
 

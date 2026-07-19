@@ -8,9 +8,9 @@ import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from context_reviewer.context_tree import FileContextUsage
+from context_reviewer.context.models import FileContextUsage
 
-from context_reviewer.tool_results import (
+from context_reviewer.agents.cursor.tool_results import (
     CODE_SEARCH_TOOL_NAMES,
     SEARCH_TOOL_NAMES,
     extract_code_search_matches,

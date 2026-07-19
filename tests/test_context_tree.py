@@ -1,4 +1,4 @@
-"""Tests for context_tree.py module."""
+"""Tests for context tree rendering and Cursor context extraction."""
 
 import sys
 import unittest
@@ -6,19 +6,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from context_reviewer.extractor import (
+from context_reviewer.agents.cursor.context import (
+    build_context_tree,
+    last_user_bubble_index,
+)
+from context_reviewer.agents.cursor.extractor import (
     collect_context_usage,
     extract_edit_context,
     extract_read_context,
     is_context_tool,
     is_edit_tool,
 )
-from context_reviewer.context_tree import (
-    FileContextUsage,
-    build_context_tree,
-    format_context_tree,
+from context_reviewer.context.models import FileContextUsage
+from context_reviewer.render import format_context_tree
+from context_reviewer.render.recency import (
     format_recency_dots,
-    last_user_bubble_index,
     normalize_bubble_percent,
     recency_filled_dots,
 )
