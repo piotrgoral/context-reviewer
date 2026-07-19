@@ -4,12 +4,14 @@ Cursor-specific context extraction from tool calls.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
-from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Set, Tuple
 
 ContextReadKind = Literal["read", "search", "code_search"]
+ContentLookup = Callable[[str], Optional[str]]
 
 from context_reviewer.context.models import FileContextUsage
 
@@ -67,6 +69,8 @@ _PATCH_HUNK_RE = re.compile(
 )
 _PATCH_CONTENT_KEYS = ("patch", "input", "contents", "unifiedPatch", "diff")
 _MULTIEDIT_KEYS = ("edits", "Edits")
+_STREAMING_CONTENT_KEYS = ("streamingContent", "streaming_content")
+
 def _lines_from_range(start_line: int, end_line: int) -> Set[int]:
     if end_line < start_line:
         return set()
@@ -112,9 +116,88 @@ def _extract_multiedit_lines(args: Dict[str, Any]) -> Set[int]:
     return lines
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_lines_from_result_diff(result: Dict[str, Any]) -> Set[int]:
+    diff = result.get("diff")
+    if not isinstance(diff, dict):
+        return set()
+    chunks = diff.get("chunks")
+    if not isinstance(chunks, list):
+        return set()
+
+    lines: Set[int] = set()
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        new_start = _coerce_int(chunk.get("newStart"))
+        new_lines = _coerce_int(chunk.get("newLines"))
+        old_start = _coerce_int(chunk.get("oldStart"))
+        old_lines = _coerce_int(chunk.get("oldLines"))
+
+        if new_start is not None and new_lines is not None and new_lines > 0:
+            lines.update(range(new_start, new_start + new_lines))
+        elif old_start is not None and old_lines is not None and old_lines > 0:
+            lines.update(range(old_start, old_start + old_lines))
+    return lines
+
+
+def _extract_lines_from_content_diff(before: str, after: str) -> Set[int]:
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    lines: Set[int] = set()
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+        None, before_lines, after_lines
+    ).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in {"replace", "insert"} and j2 > j1:
+            lines.update(range(j1 + 1, j2 + 1))
+        elif tag == "delete" and i2 > i1:
+            lines.update(range(i1 + 1, i2 + 1))
+    return lines
+
+
+def _extract_edit_file_v2_content_lines(
+    args: Dict[str, Any],
+    result: Dict[str, Any],
+    content_lookup: ContentLookup,
+) -> Set[int]:
+    before_id = result.get("beforeContentId")
+    if not isinstance(before_id, str) or not before_id:
+        return set()
+
+    before = content_lookup(before_id)
+    if before is None:
+        return set()
+
+    streaming = _first_present(args, _STREAMING_CONTENT_KEYS)
+    if isinstance(streaming, str) and streaming:
+        after = streaming
+    else:
+        after_id = result.get("afterContentId")
+        if not isinstance(after_id, str) or not after_id:
+            return set()
+        after = content_lookup(after_id)
+        if after is None:
+            return set()
+
+    return _extract_lines_from_content_diff(before, after)
+
+
 def _extract_edit_line_usage(
     tool_name: str,
     args: Dict[str, Any],
+    result: Dict[str, Any],
+    *,
+    content_lookup: Optional[ContentLookup] = None,
 ) -> FileContextUsage:
     usage = FileContextUsage()
     if tool_name == "delete_file":
@@ -127,13 +210,21 @@ def _extract_edit_line_usage(
         patch_text = _first_present(args, _PATCH_CONTENT_KEYS)
         if isinstance(patch_text, str):
             usage.edit_lines.update(_extract_patch_lines(patch_text))
-        return usage
-    if tool_name == "MultiEdit":
+    elif tool_name == "MultiEdit":
         usage.edit_lines.update(_extract_multiedit_lines(args))
-        return usage
-    if tool_name in {"edit_file_v2", "edit_file"}:
+    elif tool_name in {"edit_file_v2", "edit_file"}:
         usage.edit_lines.update(_extract_line_range_from_dict(args))
-        return usage
+
+    if not usage.edit_lines:
+        usage.edit_lines.update(_extract_lines_from_result_diff(result))
+    if (
+        not usage.edit_lines
+        and tool_name == "edit_file_v2"
+        and content_lookup is not None
+    ):
+        usage.edit_lines.update(
+            _extract_edit_file_v2_content_lines(args, result, content_lookup)
+        )
     return usage
 
 
@@ -356,6 +447,8 @@ def _edit_was_applied(tool_name: str, result: Dict[str, Any]) -> bool:
 
 def extract_edit_context(
     tool_data: Dict[str, Any],
+    *,
+    content_lookup: Optional[ContentLookup] = None,
 ) -> Optional[Tuple[str, FileContextUsage]]:
     tool_name = tool_data.get("name")
     if tool_name not in EDIT_TOOL_NAMES:
@@ -370,7 +463,12 @@ def extract_edit_context(
     if not isinstance(file_path, str) or not file_path:
         return None
 
-    usage = _extract_edit_line_usage(tool_name, args)
+    usage = _extract_edit_line_usage(
+        tool_name,
+        args,
+        result,
+        content_lookup=content_lookup,
+    )
     return file_path, usage
 
 
@@ -471,6 +569,7 @@ def collect_context_usage(
     project_root: Optional[str] = None,
     *,
     min_bubble_index: Optional[int] = None,
+    content_lookup: Optional[ContentLookup] = None,
 ) -> Dict[str, FileContextUsage]:
     usage_by_file: Dict[str, FileContextUsage] = {}
 
@@ -488,7 +587,10 @@ def collect_context_usage(
             continue
 
         if is_edit_tool(tool_name):
-            edit_usage = extract_edit_context(tool_data)
+            edit_usage = extract_edit_context(
+                tool_data,
+                content_lookup=content_lookup,
+            )
             if edit_usage:
                 file_path, usage = edit_usage
                 _merge_edit_usage(

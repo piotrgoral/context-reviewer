@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from typing import Optional
 
+from context_reviewer.agents.cursor.content_lookup import CursorContentLookup
 from context_reviewer.agents.cursor.context import build_context_tree
 from context_reviewer.agents.cursor.viewer import CursorChatViewer
 from context_reviewer.render import format_context_tree
@@ -117,10 +118,12 @@ def show_context_tree(
             print("No messages found in dialog.")
             return
 
+        content_lookup = CursorContentLookup(viewer.global_storage_path)
         tree = build_context_tree(
             messages,
             project_root=project.get("folder_path"),
             last_turn=last_turn,
+            content_lookup=content_lookup,
         )
         print(
             format_context_tree(

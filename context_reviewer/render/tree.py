@@ -70,6 +70,21 @@ def _is_renderable(
     return has_mode_detail(file_usage, mode=mode)
 
 
+def _has_renderable_files(
+    node: _ContextTreeNode,
+    *,
+    mode: ContextTreeMode = "reads",
+    files_only: bool = False,
+) -> bool:
+    for file_usage in node.files.values():
+        if _is_renderable(file_usage, mode=mode, files_only=files_only):
+            return True
+    for subdir in node.subdirs.values():
+        if _has_renderable_files(subdir, mode=mode, files_only=files_only):
+            return True
+    return False
+
+
 def _count_renderable_subtree(
     node: _ContextTreeNode,
     *,
@@ -142,6 +157,13 @@ def _render_context_tree(
         is_last = index == len(entries) - 1
         prefix = _tree_prefix(is_last, ancestors_last)
         if isinstance(value, _ContextTreeNode):
+            if not _has_renderable_files(
+                value,
+                mode=mode,
+                files_only=files_only,
+            ):
+                continue
+
             truncation_hint = ""
             if max_depth is not None and depth >= max_depth:
                 hidden_count = _count_renderable_subtree(

@@ -11,6 +11,7 @@ from context_reviewer.agents.cursor.context import (
     last_user_bubble_index,
 )
 from context_reviewer.agents.cursor.extractor import (
+    _extract_lines_from_content_diff,
     collect_context_usage,
     extract_edit_context,
     extract_read_context,
@@ -591,14 +592,104 @@ class TestExtractEditContext(unittest.TestCase):
             "rawArgs": {
                 "file_path": f"{PROJECT_ROOT}/cursor_chronicle/cli.py",
             },
-            "result": {"isApplied": True},
+            "result": {
+                "isApplied": True,
+                "diff": {
+                    "chunks": [
+                        {
+                            "oldStart": 24,
+                            "newStart": 24,
+                            "oldLines": 5,
+                            "newLines": 5,
+                        }
+                    ]
+                },
+            },
         }
         result = extract_edit_context(tool_data)
         self.assertIsNotNone(result)
         file_path, usage = result
         self.assertEqual(file_path, f"{PROJECT_ROOT}/cursor_chronicle/cli.py")
         self.assertFalse(usage.deleted)
-        self.assertEqual(usage.edit_lines, set())
+        self.assertEqual(usage.edit_lines, set(range(24, 29)))
+
+    def test_search_replace_multiple_diff_chunks(self):
+        tool_data = {
+            "name": "search_replace",
+            "status": "completed",
+            "rawArgs": {"file_path": f"{PROJECT_ROOT}/module.py"},
+            "result": {
+                "isApplied": True,
+                "diff": {
+                    "chunks": [
+                        {"newStart": 10, "newLines": 2},
+                        {"newStart": 50, "newLines": 1},
+                    ]
+                },
+            },
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, {10, 11, 50})
+
+    def test_search_replace_deletion_only_chunk_uses_old_range(self):
+        tool_data = {
+            "name": "search_replace",
+            "status": "completed",
+            "rawArgs": {"file_path": f"{PROJECT_ROOT}/module.py"},
+            "result": {
+                "isApplied": True,
+                "diff": {
+                    "chunks": [{"oldStart": 22, "oldLines": 5, "newStart": 22, "newLines": 0}]
+                },
+            },
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, set(range(22, 27)))
+
+    def test_edit_notebook_extracts_lines_from_result_diff(self):
+        tool_data = {
+            "name": "edit_notebook",
+            "status": "completed",
+            "rawArgs": {
+                "target_notebook": f"{PROJECT_ROOT}/analysis.ipynb",
+                "cell_idx": 0,
+            },
+            "result": {
+                "isApplied": True,
+                "diff": {
+                    "chunks": [
+                        {"oldStart": 1, "newStart": 1, "oldLines": 1, "newLines": 3}
+                    ]
+                },
+            },
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, {1, 2, 3})
+
+    def test_multiedit_falls_back_to_result_diff(self):
+        tool_data = {
+            "name": "MultiEdit",
+            "status": "completed",
+            "rawArgs": {
+                "path": f"{PROJECT_ROOT}/multi.py",
+                "edits": [
+                    {
+                        "old_string": "foo",
+                        "new_string": "bar",
+                    }
+                ],
+            },
+            "result": {
+                "isApplied": True,
+                "diff": {
+                    "chunks": [
+                        {"oldStart": 12, "newStart": 12, "oldLines": 4, "newLines": 4}
+                    ]
+                },
+            },
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, set(range(12, 16)))
 
     def test_skips_rejected_write(self):
         tool_data = {
@@ -621,6 +712,7 @@ class TestExtractEditContext(unittest.TestCase):
         file_path, usage = result
         self.assertEqual(file_path, f"{PROJECT_ROOT}/module.py")
         self.assertFalse(usage.deleted)
+        self.assertEqual(usage.edit_lines, set())
 
     def test_delete_file(self):
         tool_data = {
@@ -648,6 +740,70 @@ class TestExtractEditContext(unittest.TestCase):
         }
         _, usage = extract_edit_context(tool_data)
         self.assertEqual(usage.edit_lines, set(range(10, 16)))
+
+    def test_edit_file_v2_content_diff_without_lookup(self):
+        tool_data = {
+            "name": "edit_file_v2",
+            "status": "completed",
+            "params": {
+                "relativeWorkspacePath": f"{PROJECT_ROOT}/module.py",
+                "streamingContent": "line1\nline2 changed\nline3\n",
+            },
+            "result": {
+                "beforeContentId": "composer.content.before",
+                "afterContentId": "composer.content.after",
+            },
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, set())
+
+    def test_edit_file_v2_content_diff_with_lookup(self):
+        before = "line1\nline2\nline3\n"
+        after = "line1\nline2 changed\nline3\n"
+        lookup = {
+            "composer.content.before": before,
+            "composer.content.after": after,
+        }
+        tool_data = {
+            "name": "edit_file_v2",
+            "status": "completed",
+            "params": {
+                "relativeWorkspacePath": f"{PROJECT_ROOT}/module.py",
+            },
+            "result": {
+                "beforeContentId": "composer.content.before",
+                "afterContentId": "composer.content.after",
+            },
+        }
+        _, usage = extract_edit_context(
+            tool_data,
+            content_lookup=lookup.get,
+        )
+        self.assertEqual(usage.edit_lines, {2})
+
+    def test_edit_file_v2_uses_streaming_content_when_present(self):
+        before = "alpha\nbeta\n"
+        after = "alpha\nbeta changed\n"
+        lookup = {"composer.content.before": before}
+        tool_data = {
+            "name": "edit_file_v2",
+            "status": "completed",
+            "params": {
+                "relativeWorkspacePath": f"{PROJECT_ROOT}/module.py",
+                "streamingContent": after,
+            },
+            "result": {"beforeContentId": "composer.content.before"},
+        }
+        _, usage = extract_edit_context(
+            tool_data,
+            content_lookup=lookup.get,
+        )
+        self.assertEqual(usage.edit_lines, {2})
+
+    def test_extract_lines_from_content_diff_marks_deletions(self):
+        before = "keep\nremove me\nkeep2\n"
+        after = "keep\nkeep2\n"
+        self.assertEqual(_extract_lines_from_content_diff(before, after), {2})
 
     def test_write_marks_full_file(self):
         tool_data = {
@@ -718,7 +874,19 @@ class TestCollectEditUsage(unittest.TestCase):
                     "name": "search_replace",
                     "status": "completed",
                     "rawArgs": {"file_path": f"{PROJECT_ROOT}/cli.py"},
-                    "result": {"isApplied": True},
+                    "result": {
+                        "isApplied": True,
+                        "diff": {
+                            "chunks": [
+                                {
+                                    "oldStart": 24,
+                                    "newStart": 24,
+                                    "oldLines": 5,
+                                    "newLines": 5,
+                                }
+                            ]
+                        },
+                    },
                 },
             },
             {
@@ -727,7 +895,12 @@ class TestCollectEditUsage(unittest.TestCase):
                     "name": "search_replace",
                     "status": "completed",
                     "rawArgs": {"file_path": f"{PROJECT_ROOT}/cli.py"},
-                    "result": {"isApplied": True},
+                    "result": {
+                        "isApplied": True,
+                        "diff": {
+                            "chunks": [{"newStart": 40, "newLines": 3}]
+                        },
+                    },
                 },
             },
             {
@@ -736,13 +909,20 @@ class TestCollectEditUsage(unittest.TestCase):
                     "name": "search_replace",
                     "status": "completed",
                     "rawArgs": {"file_path": f"{PROJECT_ROOT}/cli.py"},
-                    "result": {"isApplied": True},
+                    "result": {
+                        "isApplied": True,
+                        "diff": {"chunks": [{"newStart": 50, "newLines": 1}]},
+                    },
                 },
             },
         ]
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         self.assertEqual(usage["cli.py"].hits, 1)
         self.assertEqual(usage["cli.py"].edit_hits, 3)
+        self.assertEqual(
+            usage["cli.py"].edit_lines,
+            set(range(24, 29)) | set(range(40, 43)) | {50},
+        )
         self.assertEqual(usage["cli.py"].last_bubble_index, 0)
         self.assertEqual(usage["cli.py"].last_edit_bubble_index, 3)
 
@@ -757,7 +937,7 @@ class TestCollectEditUsage(unittest.TestCase):
             total_bubbles=len(messages),
         )
         self.assertIn(
-            "cli.py [3 edits] [· · · · ·] — edited",
+            "cli.py [3 edits] [· · · · ·] — L24-L28, L40-L42, L50",
             edit_output,
         )
         self.assertNotIn("[1 read]", edit_output)
@@ -870,6 +1050,37 @@ class TestFormatContextWorktree(unittest.TestCase):
             output,
         )
         self.assertNotIn("[3 edits]", output)
+
+    def test_edits_mode_hides_read_only_outside_project_paths(self):
+        usage = {
+            "../../../.cursor/projects/foo/agent-transcripts/uuid/uuid.jsonl": FileContextUsage(
+                lines={1, 2, 3},
+                hits=1,
+                read_hits=1,
+                last_bubble_index=1,
+            ),
+            "context_reviewer/cli.py": FileContextUsage(
+                edit_hits=2,
+                edit_lines={10, 11},
+                last_edit_bubble_index=2,
+            ),
+        }
+        output = format_context_tree(usage, mode="edits", total_bubbles=5)
+        self.assertNotIn("../", output)
+        self.assertNotIn("agent-transcripts", output)
+        self.assertIn("cli.py [2 edits]", output)
+
+    def test_edits_mode_shows_outside_project_edited_files(self):
+        usage = {
+            "../../../.cursor/foo/outside.py": FileContextUsage(
+                edit_hits=1,
+                edit_lines={5},
+                last_edit_bubble_index=1,
+            ),
+        }
+        output = format_context_tree(usage, mode="edits", total_bubbles=3)
+        self.assertIn("../", output)
+        self.assertIn("outside.py [1 edit]", output)
 
     def test_tree_shows_edit_activity_only_in_edits_mode(self):
 

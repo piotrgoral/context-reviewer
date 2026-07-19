@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from context_reviewer.agents.cursor.content_lookup import ContentLookup
 from context_reviewer.agents.cursor.extractor import collect_context_usage
 from context_reviewer.context.models import ContextTreeResult
 
@@ -24,11 +25,16 @@ def build_context_tree(
     project_root: Optional[str] = None,
     *,
     last_turn: bool = False,
+    content_lookup: Optional[ContentLookup] = None,
 ) -> ContextTreeResult:
     """Collect context usage, optionally limited to the current agent turn."""
     if not last_turn:
         return ContextTreeResult(
-            collect_context_usage(messages, project_root),
+            collect_context_usage(
+                messages,
+                project_root,
+                content_lookup=content_lookup,
+            ),
             len(messages),
         )
 
@@ -44,6 +50,7 @@ def build_context_tree(
             messages,
             project_root,
             min_bubble_index=cutoff,
+            content_lookup=content_lookup,
         ),
         post_cutoff_bubbles,
         recency_bubble_offset=cutoff + 1,
