@@ -7,17 +7,37 @@ import os
 import signal
 import sys
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional, Protocol
 
+from context_reviewer.agents.claude.context import build_context_tree as build_claude_context_tree
+from context_reviewer.agents.claude.presentation import (
+    print_dialogs as print_claude_dialogs,
+)
+from context_reviewer.agents.claude.presentation import (
+    print_projects as print_claude_projects,
+)
+from context_reviewer.agents.claude.viewer import (
+    ClaudeSessionViewer,
+    find_project as find_claude_project,
+)
+from context_reviewer.agents.claude.viewer import find_session
 from context_reviewer.agents.cursor.content_lookup import CursorContentLookup
-from context_reviewer.agents.cursor.context import build_context_tree
+from context_reviewer.agents.cursor.context import build_context_tree as build_cursor_context_tree
 from context_reviewer.agents.cursor.presentation import (
     print_all_dialogs,
-    print_dialogs,
-    print_projects,
+    print_dialogs as print_cursor_dialogs,
+    print_projects as print_cursor_projects,
 )
-from context_reviewer.agents.cursor.viewer import CursorChatViewer, find_composer, find_project
+from context_reviewer.agents.cursor.viewer import (
+    CursorChatViewer,
+    find_composer,
+    find_project as find_cursor_project,
+)
 from context_reviewer.render import format_context_tree
+
+
+class ContextViewer(Protocol):
+    def get_projects(self) -> List[Dict[str, Any]]: ...
 
 
 def parse_date(date_str: str) -> datetime:
@@ -62,7 +82,26 @@ def resolve_use_color(color: Optional[bool] = None) -> bool:
     return sys.stdout.isatty()
 
 
-def show_context_tree(
+def _select_project(
+    projects: List[Dict[str, Any]],
+    project_name: Optional[str],
+    find_project_fn,
+) -> Optional[Dict[str, Any]]:
+    if not projects:
+        print("No projects found.")
+        return None
+
+    if project_name:
+        project = find_project_fn(projects, project_name)
+        if not project:
+            print(f"Project '{project_name}' not found.")
+            return None
+        return project
+
+    return projects[0]
+
+
+def show_cursor_context_tree(
     viewer: CursorChatViewer,
     project_name: Optional[str] = None,
     dialog_name: Optional[str] = None,
@@ -72,22 +111,12 @@ def show_context_tree(
     context_tree_depth: Optional[int] = None,
     last_turn: bool = False,
     color: Optional[bool] = None,
-):
-    """Show context tree for a dialog."""
+) -> None:
+    """Show context tree for a Cursor dialog."""
     projects = viewer.get_projects()
-
-    if not projects:
-        print("No projects found.")
+    project = _select_project(projects, project_name, find_cursor_project)
+    if project is None:
         return
-
-    project = None
-    if project_name:
-        project = find_project(projects, project_name)
-        if not project:
-            print(f"Project '{project_name}' not found.")
-            return
-    else:
-        project = projects[0]
 
     composer = None
     if dialog_name:
@@ -97,14 +126,11 @@ def show_context_tree(
                 f"Dialog '{dialog_name}' not found in project '{project['project_name']}'."
             )
             return
+    elif project["composers"]:
+        composer = max(project["composers"], key=lambda item: item.get("lastUpdatedAt", 0))
     else:
-        if project["composers"]:
-            composer = max(
-                project["composers"], key=lambda x: x.get("lastUpdatedAt", 0)
-            )
-        else:
-            print(f"No dialogs found in project '{project['project_name']}'.")
-            return
+        print(f"No dialogs found in project '{project['project_name']}'.")
+        return
 
     composer_id = composer.get("composerId")
     if not composer_id:
@@ -118,7 +144,7 @@ def show_context_tree(
             return
 
         content_lookup = CursorContentLookup(viewer.global_storage_path)
-        tree = build_context_tree(
+        tree = build_cursor_context_tree(
             messages,
             project_root=project.get("folder_path"),
             last_turn=last_turn,
@@ -136,9 +162,110 @@ def show_context_tree(
                 max_depth=context_tree_depth,
             )
         )
+    except Exception as exc:
+        print(f"Error reading dialog: {exc}")
 
-    except Exception as e:
-        print(f"Error reading dialog: {e}")
+
+def show_claude_context_tree(
+    viewer: ClaudeSessionViewer,
+    project_name: Optional[str] = None,
+    dialog_name: Optional[str] = None,
+    *,
+    mode: str = "reads",
+    files_only: bool = False,
+    context_tree_depth: Optional[int] = None,
+    last_turn: bool = False,
+    color: Optional[bool] = None,
+) -> None:
+    """Show context tree for a Claude Code session."""
+    projects = viewer.get_projects()
+    project = _select_project(projects, project_name, find_claude_project)
+    if project is None:
+        return
+
+    session = None
+    sessions = project.get("sessions", [])
+    if dialog_name:
+        session = find_session(sessions, dialog_name)
+        if not session:
+            print(
+                f"Session '{dialog_name}' not found in project '{project['project_name']}'."
+            )
+            return
+    elif sessions:
+        session = max(sessions, key=lambda item: item.get("lastUpdatedAt", 0))
+    else:
+        print(f"No sessions found in project '{project['project_name']}'.")
+        return
+
+    session_id = session.get("session_id")
+    if not session_id:
+        print("Session ID not found.")
+        return
+
+    try:
+        messages = viewer.get_session_messages(session_id)
+        if not messages:
+            print("No messages found in session.")
+            return
+
+        tree = build_claude_context_tree(
+            messages,
+            project_root=project.get("folder_path"),
+            last_turn=last_turn,
+        )
+        print(
+            format_context_tree(
+                tree.usage,
+                mode=mode,
+                files_only=files_only,
+                total_bubbles=tree.total_bubbles,
+                recency_bubble_offset=tree.recency_bubble_offset,
+                empty_message=tree.empty_message,
+                color=resolve_use_color(color),
+                max_depth=context_tree_depth,
+            )
+        )
+    except Exception as exc:
+        print(f"Error reading session: {exc}")
+
+
+def show_context_tree(
+    viewer: ContextViewer,
+    project_name: Optional[str] = None,
+    dialog_name: Optional[str] = None,
+    *,
+    agent: str,
+    mode: str = "reads",
+    files_only: bool = False,
+    context_tree_depth: Optional[int] = None,
+    last_turn: bool = False,
+    color: Optional[bool] = None,
+) -> None:
+    """Dispatch context-tree rendering to the selected agent backend."""
+    if agent == "claude":
+        show_claude_context_tree(
+            viewer,  # type: ignore[arg-type]
+            project_name,
+            dialog_name,
+            mode=mode,
+            files_only=files_only,
+            context_tree_depth=context_tree_depth,
+            last_turn=last_turn,
+            color=color,
+        )
+        return
+
+    show_cursor_context_tree(
+        viewer,  # type: ignore[arg-type]
+        project_name,
+        dialog_name,
+        mode=mode,
+        files_only=files_only,
+        context_tree_depth=context_tree_depth,
+        last_turn=last_turn,
+        color=color,
+    )
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -148,32 +275,50 @@ def create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --cursor --list-projects              # List all projects
-  %(prog)s --cursor --list-dialogs myproject     # List dialogs in project
-  %(prog)s --cursor --list-all                   # List all dialogs (oldest first)
-  %(prog)s --cursor --list-all --desc            # List all dialogs (newest first)
-  %(prog)s --cursor -p myproject -d "my chat"    # Show context tree for dialog
-  %(prog)s --cursor -p myproject -d "my chat" --files-only
-  %(prog)s --cursor -p myproject -d "my chat" --edits
-  %(prog)s --cursor -p myproject -d "my chat" --last-turn --context-tree-depth 2
+  %(prog)s --cursor --list-projects              # List Cursor projects
+  %(prog)s --claude --list-projects              # List Claude Code projects
+  %(prog)s --cursor --list-dialogs myproject     # List Cursor dialogs
+  %(prog)s --claude --list-dialogs myproject     # List Claude sessions
+  %(prog)s --cursor --list-all                   # List all Cursor dialogs
+  %(prog)s --cursor -p myproject -d "my chat"    # Cursor context tree
+  %(prog)s --claude -p myproject -d "my chat"    # Claude context tree
+  %(prog)s --claude -p myproject -d "my chat" --files-only
+  %(prog)s --claude -p myproject -d "my chat" --last-turn --context-tree-depth 2
         """,
     )
 
-    parser.add_argument(
+    agent_group = parser.add_mutually_exclusive_group(required=True)
+    agent_group.add_argument(
         "--cursor",
         action="store_true",
-        help="Use Cursor IDE as the agent data source (required for now)",
+        help="Use Cursor IDE as the agent data source",
+    )
+    agent_group.add_argument(
+        "--claude",
+        action="store_true",
+        help="Use Claude Code as the agent data source",
     )
 
     parser.add_argument(
         "--project", "-p", help="Project name (partial match supported)"
     )
-    parser.add_argument("--dialog", "-d", help="Dialog name (partial match supported)")
+    parser.add_argument(
+        "--dialog",
+        "-d",
+        help="Dialog/session name (partial match supported)",
+    )
     parser.add_argument(
         "--list-projects", action="store_true", help="Show list of projects"
     )
-    parser.add_argument("--list-dialogs", help="Show list of dialogs for project")
-    parser.add_argument("--list-all", action="store_true", help="List all dialogs")
+    parser.add_argument(
+        "--list-dialogs",
+        help="Show list of dialogs/sessions for project",
+    )
+    parser.add_argument(
+        "--list-all",
+        action="store_true",
+        help="List all dialogs (Cursor only for now)",
+    )
     parser.add_argument(
         "--from", dest="start_date", type=parse_date, help="Filter after date"
     )
@@ -229,34 +374,47 @@ Examples:
     return parser
 
 
-def _require_cursor(args: argparse.Namespace) -> bool:
-    if args.cursor:
-        return True
-    print("Error: --cursor is required (only Cursor is supported for now).")
-    return False
-
-
-def main():
+def main() -> None:
     """Main entry point."""
-    # Handle broken pipe gracefully (SIGPIPE is Unix-only)
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     parser = create_parser()
     args = parser.parse_args()
+    agent = "claude" if args.claude else "cursor"
 
-    if not _require_cursor(args):
+    if args.list_all and agent == "claude":
+        print("Error: --list-all is not supported for --claude yet.")
         sys.exit(1)
 
-    viewer = CursorChatViewer()
+    if agent == "claude":
+        viewer: ContextViewer = ClaudeSessionViewer()
+        if args.list_projects:
+            print_claude_projects(viewer)  # type: ignore[arg-type]
+        elif args.list_dialogs:
+            print_claude_dialogs(viewer, args.list_dialogs)  # type: ignore[arg-type]
+        else:
+            show_context_tree(
+                viewer,
+                args.project,
+                args.dialog,
+                agent=agent,
+                mode="edits" if args.edits else "reads",
+                files_only=args.files_only,
+                context_tree_depth=args.context_tree_depth,
+                last_turn=args.last_turn,
+                color=args.color,
+            )
+        return
 
+    cursor_viewer = CursorChatViewer()
     if args.list_projects:
-        print_projects(viewer)
+        print_cursor_projects(cursor_viewer)
     elif args.list_dialogs:
-        print_dialogs(viewer, args.list_dialogs)
+        print_cursor_dialogs(cursor_viewer, args.list_dialogs)
     elif args.list_all:
         print_all_dialogs(
-            viewer,
+            cursor_viewer,
             start_date=args.start_date,
             end_date=args.end_date,
             project_filter=args.project,
@@ -267,9 +425,10 @@ def main():
         )
     else:
         show_context_tree(
-            viewer,
+            cursor_viewer,
             args.project,
             args.dialog,
+            agent=agent,
             mode="edits" if args.edits else "reads",
             files_only=args.files_only,
             context_tree_depth=args.context_tree_depth,
