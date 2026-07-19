@@ -1,20 +1,20 @@
 """
 Cursor-specific context extraction from tool calls.
+
+Read-line-range math lives in ``_read_extraction``, edit-diff/patch math lives
+in ``_edit_extraction``; this module owns generic tool-name dispatch, search
+extraction, path resolution, and aggregation across a whole dialog.
 """
 
 from __future__ import annotations
 
-import difflib
-import json
 import os
-import re
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Set, Tuple
-
-ContextReadKind = Literal["read", "search", "code_search"]
-ContentLookup = Callable[[str], Optional[str]]
+from typing import Dict, List, Literal, Optional, Tuple
 
 from context_reviewer.context.models import FileContextUsage
 
+from context_reviewer.agents.cursor.content_lookup import ContentLookup
+from context_reviewer.agents.cursor.paths import strip_file_uri
 from context_reviewer.agents.cursor.tool_results import (
     CODE_SEARCH_TOOL_NAMES,
     SEARCH_TOOL_NAMES,
@@ -22,293 +22,27 @@ from context_reviewer.agents.cursor.tool_results import (
     extract_search_matches,
 )
 
-READ_CONTEXT_TOOL_NAMES = frozenset({"read_file", "read_file_v2"})
-EDIT_TOOL_NAMES = frozenset(
-    {
-        "edit_file_v2",
-        "search_replace",
-        "write",
-        "edit_file",
-        "edit_notebook",
-        "apply_patch",
-        "MultiEdit",
-        "delete_file",
-    }
+from ._edit_extraction import (  # noqa: F401 - re-exported for tests/consumers
+    EDIT_TOOL_NAMES,
+    _extract_lines_from_content_diff,
+    extract_edit_context,
+    is_edit_tool,
 )
+from ._read_extraction import (  # noqa: F401 - re-exported for tests/consumers
+    READ_CONTEXT_TOOL_NAMES,
+    extract_read_context,
+)
+from ._shared import _PATH_KEYS, _first_present, _parse_tool_args
+
+ContextReadKind = Literal["read", "search", "code_search"]
+
 CONTEXT_TOOL_NAMES = (
     READ_CONTEXT_TOOL_NAMES | SEARCH_TOOL_NAMES | CODE_SEARCH_TOOL_NAMES
 )
 
-_PATH_KEYS = (
-    "path",
-    "targetFile",
-    "target_file",
-    "file_path",
-    "relativeWorkspacePath",
-    "relative_workspace_path",
-    "effectiveUri",
-    "target_notebook",
-)
-_START_KEYS = ("offset", "start_line_one_indexed", "startLineOneIndexed")
-_END_KEYS = (
-    "end_line_one_indexed",
-    "end_line_one_indexed_inclusive",
-    "endLineOneIndexedInclusive",
-)
-_RESULT_START_KEYS = ("startLineOneIndexed",)
-_RESULT_END_KEYS = ("endLineOneIndexedInclusive",)
-_LIMIT_KEYS = ("limit", "maxLines")
-_FULL_FILE_KEYS = (
-    "readEntireFile",
-    "should_read_entire_file",
-    "readFullFile",
-)
-_PATCH_HUNK_RE = re.compile(
-    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
-    re.MULTILINE,
-)
-_PATCH_CONTENT_KEYS = ("patch", "input", "contents", "unifiedPatch", "diff")
-_MULTIEDIT_KEYS = ("edits", "Edits")
-_STREAMING_CONTENT_KEYS = ("streamingContent", "streaming_content")
-
-def _lines_from_range(start_line: int, end_line: int) -> Set[int]:
-    if end_line < start_line:
-        return set()
-    return set(range(start_line, end_line + 1))
-
-
-def _extract_line_range_from_dict(data: Dict[str, Any]) -> Set[int]:
-    start = _first_present(data, _START_KEYS)
-    end = _first_present(data, _END_KEYS)
-    if start is None and end is None:
-        return set()
-    start_line = int(start) if start is not None else 1
-    end_line = int(end) if end is not None else start_line
-    return _lines_from_range(start_line, end_line)
-
-
-def _extract_patch_lines(patch_text: str) -> Set[int]:
-    lines: Set[int] = set()
-    for match in _PATCH_HUNK_RE.finditer(patch_text):
-        new_start = int(match.group(3))
-        new_count = int(match.group(4)) if match.group(4) is not None else 1
-        if new_count <= 0:
-            lines.add(new_start)
-            continue
-        lines.update(range(new_start, new_start + new_count))
-    return lines
-
-
-def _extract_multiedit_lines(args: Dict[str, Any]) -> Set[int]:
-    edits = None
-    for key in _MULTIEDIT_KEYS:
-        candidate = args.get(key)
-        if isinstance(candidate, list):
-            edits = candidate
-            break
-    if not edits:
-        return set()
-
-    lines: Set[int] = set()
-    for edit in edits:
-        if isinstance(edit, dict):
-            lines.update(_extract_line_range_from_dict(edit))
-    return lines
-
-
-def _coerce_int(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _extract_lines_from_result_diff(result: Dict[str, Any]) -> Set[int]:
-    diff = result.get("diff")
-    if not isinstance(diff, dict):
-        return set()
-    chunks = diff.get("chunks")
-    if not isinstance(chunks, list):
-        return set()
-
-    lines: Set[int] = set()
-    for chunk in chunks:
-        if not isinstance(chunk, dict):
-            continue
-        new_start = _coerce_int(chunk.get("newStart"))
-        new_lines = _coerce_int(chunk.get("newLines"))
-        old_start = _coerce_int(chunk.get("oldStart"))
-        old_lines = _coerce_int(chunk.get("oldLines"))
-
-        if new_start is not None and new_lines is not None and new_lines > 0:
-            lines.update(range(new_start, new_start + new_lines))
-        elif old_start is not None and old_lines is not None and old_lines > 0:
-            lines.update(range(old_start, old_start + old_lines))
-    return lines
-
-
-def _extract_lines_from_content_diff(before: str, after: str) -> Set[int]:
-    before_lines = before.splitlines()
-    after_lines = after.splitlines()
-    lines: Set[int] = set()
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, before_lines, after_lines
-    ).get_opcodes():
-        if tag == "equal":
-            continue
-        if tag in {"replace", "insert"} and j2 > j1:
-            lines.update(range(j1 + 1, j2 + 1))
-        elif tag == "delete" and i2 > i1:
-            lines.update(range(i1 + 1, i2 + 1))
-    return lines
-
-
-def _extract_edit_file_v2_content_lines(
-    args: Dict[str, Any],
-    result: Dict[str, Any],
-    content_lookup: ContentLookup,
-) -> Set[int]:
-    before_id = result.get("beforeContentId")
-    if not isinstance(before_id, str) or not before_id:
-        return set()
-
-    before = content_lookup(before_id)
-    if before is None:
-        return set()
-
-    streaming = _first_present(args, _STREAMING_CONTENT_KEYS)
-    if isinstance(streaming, str) and streaming:
-        after = streaming
-    else:
-        after_id = result.get("afterContentId")
-        if not isinstance(after_id, str) or not after_id:
-            return set()
-        after = content_lookup(after_id)
-        if after is None:
-            return set()
-
-    return _extract_lines_from_content_diff(before, after)
-
-
-def _extract_edit_line_usage(
-    tool_name: str,
-    args: Dict[str, Any],
-    result: Dict[str, Any],
-    *,
-    content_lookup: Optional[ContentLookup] = None,
-) -> FileContextUsage:
-    usage = FileContextUsage()
-    if tool_name == "delete_file":
-        usage.deleted = True
-        return usage
-    if tool_name == "write":
-        usage.edit_full_file = True
-        return usage
-    if tool_name == "apply_patch":
-        patch_text = _first_present(args, _PATCH_CONTENT_KEYS)
-        if isinstance(patch_text, str):
-            usage.edit_lines.update(_extract_patch_lines(patch_text))
-    elif tool_name == "MultiEdit":
-        usage.edit_lines.update(_extract_multiedit_lines(args))
-    elif tool_name in {"edit_file_v2", "edit_file"}:
-        usage.edit_lines.update(_extract_line_range_from_dict(args))
-
-    if not usage.edit_lines:
-        usage.edit_lines.update(_extract_lines_from_result_diff(result))
-    if (
-        not usage.edit_lines
-        and tool_name == "edit_file_v2"
-        and content_lookup is not None
-    ):
-        usage.edit_lines.update(
-            _extract_edit_file_v2_content_lines(args, result, content_lookup)
-        )
-    return usage
-
 
 def is_context_tool(tool_name: Optional[str]) -> bool:
     return tool_name in CONTEXT_TOOL_NAMES
-
-
-def is_edit_tool(tool_name: Optional[str]) -> bool:
-    return tool_name in EDIT_TOOL_NAMES
-
-
-def _parse_json_field(value: Any) -> Optional[Any]:
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str) and value:
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def _parse_tool_args(tool_data: Dict[str, Any]) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
-    for key in ("params", "rawArgs"):
-        parsed = _parse_json_field(tool_data.get(key))
-        if isinstance(parsed, dict):
-            merged.update(parsed)
-    return merged
-
-
-def _parse_tool_result(tool_data: Dict[str, Any]) -> Dict[str, Any]:
-    parsed = _parse_json_field(tool_data.get("result"))
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _first_present(data: Dict[str, Any], keys: Iterable[str]) -> Any:
-    for key in keys:
-        if key in data and data[key] is not None:
-            return data[key]
-    return None
-
-
-def _is_truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() in {"true", "1", "yes"}
-    return bool(value)
-
-
-def _line_count_from_contents(contents: Any) -> int:
-    if not isinstance(contents, str) or not contents:
-        return 0
-    return len(contents.splitlines())
-
-
-def _has_explicit_read_range(args: Dict[str, Any]) -> bool:
-    return (
-        _first_present(args, _START_KEYS) is not None
-        or _first_present(args, _END_KEYS) is not None
-        or _first_present(args, _LIMIT_KEYS) is not None
-    )
-
-
-def _is_metadata_only_full_read(
-    args: Dict[str, Any],
-    result: Dict[str, Any],
-    total_lines: Optional[int],
-    content_lines: int,
-) -> bool:
-    if total_lines is None or total_lines <= 0:
-        return False
-    if content_lines > 0:
-        return False
-    if _has_explicit_read_range(args):
-        return False
-    if _first_present(result, _RESULT_START_KEYS) is not None:
-        return False
-    if _first_present(result, _RESULT_END_KEYS) is not None:
-        return False
-    if result.get("contents") not in (None, ""):
-        return False
-    return True
 
 
 def _normalize_path(path: str, project_root: Optional[str] = None) -> str:
@@ -317,9 +51,7 @@ def _normalize_path(path: str, project_root: Optional[str] = None) -> str:
 
     normalized = path.replace("\\", "/")
     if normalized.startswith("file://"):
-        from urllib.parse import unquote, urlparse
-
-        normalized = unquote(urlparse(normalized).path)
+        normalized = strip_file_uri(normalized)
 
     if project_root:
         root = os.path.normpath(project_root)
@@ -334,7 +66,31 @@ def _normalize_path(path: str, project_root: Optional[str] = None) -> str:
     return normalized.replace("\\", "/")
 
 
-def _resolve_search_file(match_file: str, tool_args: Dict[str, Any]) -> str:
+def _resolve_project_relative_path(
+    file_path: str, project_root: Optional[str]
+) -> Optional[str]:
+    """Normalize ``file_path`` relative to ``project_root``, or None if it falls outside it."""
+    rel_path = _normalize_path(file_path, project_root)
+    if not rel_path:
+        return None
+
+    if project_root and os.path.isabs(file_path.replace("\\", "/")):
+        abs_path = os.path.normpath(file_path.replace("\\", "/"))
+        root = os.path.normpath(project_root)
+        try:
+            if os.path.commonpath([abs_path, root]) != root:
+                return None
+        except ValueError:
+            return None
+
+    return rel_path
+
+
+def _track_last_index(current: Optional[int], new: int) -> int:
+    return new if current is None else max(current, new)
+
+
+def _resolve_search_file(match_file: str, tool_args: Dict) -> str:
     search_path = _first_present(tool_args, _PATH_KEYS)
     if isinstance(search_path, str) and search_path:
         if match_file and os.path.basename(search_path) == match_file:
@@ -343,78 +99,9 @@ def _resolve_search_file(match_file: str, tool_args: Dict[str, Any]) -> str:
             return search_path
     return match_file or str(search_path or "")
 
-def extract_read_context(
-    tool_data: Dict[str, Any],
-) -> Optional[Tuple[str, FileContextUsage]]:
-    tool_name = tool_data.get("name")
-    if tool_name not in READ_CONTEXT_TOOL_NAMES:
-        return None
-
-    args = _parse_tool_args(tool_data)
-    result = _parse_tool_result(tool_data)
-
-    file_path = _first_present(args, _PATH_KEYS) or _first_present(result, _PATH_KEYS)
-    if not isinstance(file_path, str) or not file_path:
-        return None
-
-    total_lines = _first_present(result, ("totalLinesInFile", "totalLines"))
-    if total_lines is not None:
-        total_lines = int(total_lines)
-
-    full_file = any(
-        _is_truthy(_first_present(source, _FULL_FILE_KEYS))
-        for source in (args, result)
-    )
-
-    start = _first_present(args, _START_KEYS) or _first_present(
-        result, _RESULT_START_KEYS
-    )
-    start_line = int(start) if start is not None else 1
-
-    end = _first_present(args, _END_KEYS) or _first_present(result, _RESULT_END_KEYS)
-    contents = result.get("contents")
-    content_lines = _line_count_from_contents(contents) if contents is not None else 0
-
-    if end is not None:
-        end_line = int(end)
-    else:
-        limit = _first_present(args, _LIMIT_KEYS)
-        returned_lines = _first_present(result, ("totalLines",))
-
-        if content_lines > 0:
-            end_line = start_line + content_lines - 1
-        elif limit is not None:
-            end_line = start_line + int(limit) - 1
-        elif returned_lines is not None:
-            end_line = start_line + int(returned_lines) - 1
-        elif _is_metadata_only_full_read(args, result, total_lines, content_lines):
-            full_file = True
-            end_line = total_lines if total_lines is not None else start_line
-        else:
-            end_line = start_line
-
-    if total_lines is not None and not full_file:
-        end_line = min(end_line, total_lines)
-
-    if (
-        not full_file
-        and total_lines is not None
-        and start_line <= 1
-        and end_line >= total_lines
-    ):
-        full_file = True
-
-    usage = FileContextUsage()
-    if full_file:
-        usage.full_file = True
-    elif end_line >= start_line:
-        usage.lines.update(range(start_line, end_line + 1))
-
-    return file_path, usage
-
 
 def extract_search_context(
-    tool_data: Dict[str, Any],
+    tool_data: Dict,
 ) -> List[Tuple[str, FileContextUsage]]:
     tool_name = tool_data.get("name")
     if tool_name in CODE_SEARCH_TOOL_NAMES:
@@ -435,43 +122,6 @@ def extract_search_context(
     return list(by_file.items())
 
 
-def _edit_was_applied(tool_name: str, result: Dict[str, Any]) -> bool:
-    if _is_truthy(result.get("rejected")):
-        return False
-    if tool_name == "delete_file":
-        return _is_truthy(result.get("fileDeletedSuccessfully"))
-    if "isApplied" in result and not _is_truthy(result.get("isApplied")):
-        return False
-    return True
-
-
-def extract_edit_context(
-    tool_data: Dict[str, Any],
-    *,
-    content_lookup: Optional[ContentLookup] = None,
-) -> Optional[Tuple[str, FileContextUsage]]:
-    tool_name = tool_data.get("name")
-    if tool_name not in EDIT_TOOL_NAMES:
-        return None
-
-    args = _parse_tool_args(tool_data)
-    result = _parse_tool_result(tool_data)
-    if not _edit_was_applied(tool_name, result):
-        return None
-
-    file_path = _first_present(args, _PATH_KEYS)
-    if not isinstance(file_path, str) or not file_path:
-        return None
-
-    usage = _extract_edit_line_usage(
-        tool_name,
-        args,
-        result,
-        content_lookup=content_lookup,
-    )
-    return file_path, usage
-
-
 def _merge_edit_usage(
     target: Dict[str, FileContextUsage],
     file_path: str,
@@ -479,28 +129,15 @@ def _merge_edit_usage(
     project_root: Optional[str],
     bubble_index: int,
 ) -> None:
-    rel_path = _normalize_path(file_path, project_root)
-    if not rel_path:
+    rel_path = _resolve_project_relative_path(file_path, project_root)
+    if rel_path is None:
         return
-
-    if project_root and os.path.isabs(file_path.replace("\\", "/")):
-        abs_path = os.path.normpath(file_path.replace("\\", "/"))
-        root = os.path.normpath(project_root)
-        try:
-            if os.path.commonpath([abs_path, root]) != root:
-                return
-        except ValueError:
-            return
 
     existing = target.setdefault(rel_path, FileContextUsage())
     existing.edit_hits += 1
-    if existing.last_edit_bubble_index is None:
-        existing.last_edit_bubble_index = bubble_index
-    else:
-        existing.last_edit_bubble_index = max(
-            existing.last_edit_bubble_index,
-            bubble_index,
-        )
+    existing.last_edit_bubble_index = _track_last_index(
+        existing.last_edit_bubble_index, bubble_index
+    )
     if usage.deleted:
         existing.deleted = True
     if usage.edit_full_file:
@@ -526,18 +163,9 @@ def _merge_usage(
     *,
     read_kind: ContextReadKind,
 ) -> None:
-    rel_path = _normalize_path(file_path, project_root)
-    if not rel_path:
+    rel_path = _resolve_project_relative_path(file_path, project_root)
+    if rel_path is None:
         return
-
-    if project_root and os.path.isabs(file_path.replace("\\", "/")):
-        abs_path = os.path.normpath(file_path.replace("\\", "/"))
-        root = os.path.normpath(project_root)
-        try:
-            if os.path.commonpath([abs_path, root]) != root:
-                return
-        except ValueError:
-            return
 
     existing = target.setdefault(rel_path, FileContextUsage())
     existing.hits += 1
@@ -547,10 +175,9 @@ def _merge_usage(
         existing.search_hits += 1
     else:
         existing.code_search_hits += 1
-    if existing.last_bubble_index is None:
-        existing.last_bubble_index = bubble_index
-    else:
-        existing.last_bubble_index = max(existing.last_bubble_index, bubble_index)
+    existing.last_bubble_index = _track_last_index(
+        existing.last_bubble_index, bubble_index
+    )
     if usage.full_file:
         existing.full_file = True
         _clear_line_sets(existing)

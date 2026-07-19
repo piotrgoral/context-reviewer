@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from context_reviewer.agents.cursor.content_lookup import ContentLookup
 from context_reviewer.agents.cursor.extractor import collect_context_usage
+from context_reviewer.agents.cursor.messages import BUBBLE_TYPE_USER
 from context_reviewer.context.models import ContextTreeResult
 
 _NO_USER_MESSAGES = "(no user messages in dialog)"
@@ -13,9 +14,9 @@ _NO_AGENT_MESSAGES = "(no agent messages after last user message)"
 
 
 def last_user_bubble_index(messages: List[Dict]) -> Optional[int]:
-    """Return the index of the last user message (type 1), or None."""
+    """Return the index of the last user message, or None."""
     for index in range(len(messages) - 1, -1, -1):
-        if messages[index].get("type") == 1:
+        if messages[index].get("type") == BUBBLE_TYPE_USER:
             return index
     return None
 

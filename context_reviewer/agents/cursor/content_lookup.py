@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Callable, Dict, Optional
+
+from context_reviewer.agents.cursor.db import readonly_connection
 
 ContentLookup = Callable[[str], Optional[str]]
 
@@ -24,9 +25,9 @@ class CursorContentLookup:
         return content
 
     def _fetch(self, content_id: str) -> Optional[str]:
-        if not self._db_path.exists():
-            return None
-        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
+        with readonly_connection(self._db_path) as conn:
+            if conn is None:
+                return None
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT value FROM cursorDiskKV WHERE key = ?",

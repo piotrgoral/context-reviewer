@@ -4,13 +4,19 @@ Command-line interface for context-reviewer.
 
 import argparse
 import os
+import signal
 import sys
 from datetime import datetime
 from typing import Optional
 
 from context_reviewer.agents.cursor.content_lookup import CursorContentLookup
 from context_reviewer.agents.cursor.context import build_context_tree
-from context_reviewer.agents.cursor.viewer import CursorChatViewer
+from context_reviewer.agents.cursor.presentation import (
+    print_all_dialogs,
+    print_dialogs,
+    print_projects,
+)
+from context_reviewer.agents.cursor.viewer import CursorChatViewer, find_composer, find_project
 from context_reviewer.render import format_context_tree
 
 
@@ -76,10 +82,7 @@ def show_context_tree(
 
     project = None
     if project_name:
-        for p in projects:
-            if project_name.lower() in p["project_name"].lower():
-                project = p
-                break
+        project = find_project(projects, project_name)
         if not project:
             print(f"Project '{project_name}' not found.")
             return
@@ -88,11 +91,7 @@ def show_context_tree(
 
     composer = None
     if dialog_name:
-        for c in project["composers"]:
-            c_name = c.get("name", "").lower()
-            if dialog_name.lower() in c_name:
-                composer = c
-                break
+        composer = find_composer(project["composers"], dialog_name)
         if not composer:
             print(
                 f"Dialog '{dialog_name}' not found in project '{project['project_name']}'."
@@ -239,6 +238,10 @@ def _require_cursor(args: argparse.Namespace) -> bool:
 
 def main():
     """Main entry point."""
+    # Handle broken pipe gracefully (SIGPIPE is Unix-only)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     parser = create_parser()
     args = parser.parse_args()
 
@@ -248,11 +251,12 @@ def main():
     viewer = CursorChatViewer()
 
     if args.list_projects:
-        viewer.list_projects()
+        print_projects(viewer)
     elif args.list_dialogs:
-        viewer.list_dialogs(args.list_dialogs)
+        print_dialogs(viewer, args.list_dialogs)
     elif args.list_all:
-        viewer.list_all_dialogs(
+        print_all_dialogs(
+            viewer,
             start_date=args.start_date,
             end_date=args.end_date,
             project_filter=args.project,
