@@ -3,31 +3,31 @@
 Message extraction and processing from Cursor database.
 """
 
+from __future__ import annotations
+
 import base64
 import json
-import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .db import readonly_connection
 from .utils import get_cursor_paths
 
-# Module-level override for testing
-_global_storage_override: Optional[Path] = None
+BUBBLE_TYPE_USER = 1
+BUBBLE_TYPE_ASSISTANT = 2
 
 
 def get_dialog_messages(composer_id: str, db_path: Optional[Path] = None) -> List[Dict]:
     """Get all dialog messages by composer ID."""
     if db_path:
         global_storage_path = db_path
-    elif _global_storage_override:
-        global_storage_path = _global_storage_override
     else:
         _, _, global_storage_path = get_cursor_paths()
 
     if not global_storage_path.exists():
         raise FileNotFoundError(f"Global database not found: {global_storage_path}")
 
-    with sqlite3.connect(global_storage_path) as conn:
+    with readonly_connection(global_storage_path) as conn:
         cursor = conn.cursor()
 
         cursor.execute(
@@ -100,7 +100,7 @@ def get_dialog_messages(composer_id: str, db_path: Optional[Path] = None) -> Lis
                 "is_refunded": bubble_data.get("isRefunded", False),
             }
 
-            if bubble_type == 2 and not text:
+            if bubble_type == BUBBLE_TYPE_ASSISTANT and not text:
                 is_thought_bubble = (
                     bubble_data.get("isThought")
                     or bubble_data.get("thinking")
@@ -136,6 +136,8 @@ def _extract_thinking_content(thinking_data) -> str:
             or thinking_data.get("signature")
             or ""
         )
+        # "AVSoXO" prefix marks a base64-encoded signature blob in Cursor's
+        # bubble format rather than plain thinking text; decode it if present.
         if thinking_content and thinking_content.startswith("AVSoXO"):
             try:
                 decoded = base64.b64decode(thinking_content).decode("utf-8")

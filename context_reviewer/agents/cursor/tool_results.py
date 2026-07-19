@@ -8,12 +8,12 @@ import base64
 import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+
+from context_reviewer.agents.cursor.paths import strip_file_uri
 
 SEARCH_TOOL_NAMES = frozenset({"ripgrep_raw_search", "grep", "rg", "grep_search"})
 WORKSPACE_SEARCH_TOOL_NAMES = frozenset({"ripgrep_raw_search", "grep", "rg"})
 CODE_SEARCH_TOOL_NAMES = frozenset({"codebase_search", "semantic_search_full"})
-RIPgrep_TOOL_NAME = "ripgrep_raw_search"
 
 
 @dataclass(frozen=True)
@@ -21,9 +21,6 @@ class SearchMatch:
     line_number: int
     content: str
     file: str = ""
-
-
-RipgrepMatch = SearchMatch
 
 
 def is_search_tool(tool_name: Optional[str]) -> bool:
@@ -96,7 +93,7 @@ def _file_label_from_resource(resource: Any) -> str:
     if not isinstance(resource, str) or not resource:
         return ""
     if resource.startswith("file://"):
-        path = unquote(urlparse(resource).path)
+        path = strip_file_uri(resource)
         return path.rsplit("/", 1)[-1] if path else resource
     return resource.rsplit("/", 1)[-1]
 
@@ -323,8 +320,3 @@ def extract_search_matches(tool_data: Dict[str, Any]) -> List[SearchMatch]:
             pass
 
     return []
-
-
-def extract_ripgrep_matches(tool_data: Dict[str, Any]) -> List[SearchMatch]:
-    """Backward-compatible alias for extract_search_matches."""
-    return extract_search_matches(tool_data)

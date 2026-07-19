@@ -4,12 +4,19 @@ Command-line interface for context-reviewer.
 
 import argparse
 import os
+import signal
 import sys
 from datetime import datetime
 from typing import Optional
 
+from context_reviewer.agents.cursor.content_lookup import CursorContentLookup
 from context_reviewer.agents.cursor.context import build_context_tree
-from context_reviewer.agents.cursor.viewer import CursorChatViewer
+from context_reviewer.agents.cursor.presentation import (
+    print_all_dialogs,
+    print_dialogs,
+    print_projects,
+)
+from context_reviewer.agents.cursor.viewer import CursorChatViewer, find_composer, find_project
 from context_reviewer.render import format_context_tree
 
 
@@ -59,6 +66,8 @@ def show_context_tree(
     viewer: CursorChatViewer,
     project_name: Optional[str] = None,
     dialog_name: Optional[str] = None,
+    *,
+    mode: str = "reads",
     files_only: bool = False,
     context_tree_depth: Optional[int] = None,
     last_turn: bool = False,
@@ -73,10 +82,7 @@ def show_context_tree(
 
     project = None
     if project_name:
-        for p in projects:
-            if project_name.lower() in p["project_name"].lower():
-                project = p
-                break
+        project = find_project(projects, project_name)
         if not project:
             print(f"Project '{project_name}' not found.")
             return
@@ -85,11 +91,7 @@ def show_context_tree(
 
     composer = None
     if dialog_name:
-        for c in project["composers"]:
-            c_name = c.get("name", "").lower()
-            if dialog_name.lower() in c_name:
-                composer = c
-                break
+        composer = find_composer(project["composers"], dialog_name)
         if not composer:
             print(
                 f"Dialog '{dialog_name}' not found in project '{project['project_name']}'."
@@ -115,14 +117,17 @@ def show_context_tree(
             print("No messages found in dialog.")
             return
 
+        content_lookup = CursorContentLookup(viewer.global_storage_path)
         tree = build_context_tree(
             messages,
             project_root=project.get("folder_path"),
             last_turn=last_turn,
+            content_lookup=content_lookup,
         )
         print(
             format_context_tree(
                 tree.usage,
+                mode=mode,
                 files_only=files_only,
                 total_bubbles=tree.total_bubbles,
                 recency_bubble_offset=tree.recency_bubble_offset,
@@ -149,6 +154,7 @@ Examples:
   %(prog)s --cursor --list-all --desc            # List all dialogs (newest first)
   %(prog)s --cursor -p myproject -d "my chat"    # Show context tree for dialog
   %(prog)s --cursor -p myproject -d "my chat" --files-only
+  %(prog)s --cursor -p myproject -d "my chat" --edits
   %(prog)s --cursor -p myproject -d "my chat" --last-turn --context-tree-depth 2
         """,
     )
@@ -191,6 +197,11 @@ Examples:
         help="List files only (omit line ranges and checkmarks)",
     )
     parser.add_argument(
+        "--edits",
+        action="store_true",
+        help="Show edits view instead of reads (edit counts and edited line ranges)",
+    )
+    parser.add_argument(
         "--context-tree-depth",
         type=parse_positive_int,
         default=None,
@@ -227,6 +238,10 @@ def _require_cursor(args: argparse.Namespace) -> bool:
 
 def main():
     """Main entry point."""
+    # Handle broken pipe gracefully (SIGPIPE is Unix-only)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     parser = create_parser()
     args = parser.parse_args()
 
@@ -236,11 +251,12 @@ def main():
     viewer = CursorChatViewer()
 
     if args.list_projects:
-        viewer.list_projects()
+        print_projects(viewer)
     elif args.list_dialogs:
-        viewer.list_dialogs(args.list_dialogs)
+        print_dialogs(viewer, args.list_dialogs)
     elif args.list_all:
-        viewer.list_all_dialogs(
+        print_all_dialogs(
+            viewer,
             start_date=args.start_date,
             end_date=args.end_date,
             project_filter=args.project,
@@ -254,6 +270,7 @@ def main():
             viewer,
             args.project,
             args.dialog,
+            mode="edits" if args.edits else "reads",
             files_only=args.files_only,
             context_tree_depth=args.context_tree_depth,
             last_turn=args.last_turn,

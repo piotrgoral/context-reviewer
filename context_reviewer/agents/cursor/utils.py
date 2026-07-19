@@ -3,18 +3,17 @@
 Shared utilities and constants for Cursor Chronicle.
 """
 
+from __future__ import annotations
+
 import json
 import os
-import signal
 import sqlite3
 import sys
-import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Handle broken pipe gracefully (SIGPIPE is Unix-only)
-if hasattr(signal, "SIGPIPE"):
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+from context_reviewer.agents.cursor.db import readonly_connection
+from context_reviewer.agents.cursor.paths import strip_file_uri
 
 _CODE_WORKSPACE_SUFFIX = ".code-workspace"
 
@@ -58,7 +57,7 @@ def parse_workspace_storage_meta(workspace_data: Dict) -> Tuple[str, str]:
     effective_uri = folder_uri or workspace_uri
 
     if effective_uri.startswith("file://"):
-        folder_path = urllib.parse.unquote(effective_uri[7:])
+        folder_path = strip_file_uri(effective_uri)
         raw_basename = os.path.basename(folder_path)
         return format_workspace_project_display_name(raw_basename), folder_path
 
@@ -128,7 +127,7 @@ def parse_composer_workspace_identifier(comp: Dict) -> Tuple[str, str]:
         folder_path = ""
 
     if isinstance(folder_path, str) and folder_path.startswith("file://"):
-        folder_path = urllib.parse.unquote(folder_path[7:])
+        folder_path = strip_file_uri(folder_path)
     if not folder_path:
         folder_path = "unknown"
     project_name = os.path.basename(folder_path) or folder_path
@@ -138,10 +137,10 @@ def parse_composer_workspace_identifier(comp: Dict) -> Tuple[str, str]:
 
 def load_global_composer_headers(global_storage_path: Path) -> List[Dict]:
     """Load composer headers from global ``state.vscdb``."""
-    if not global_storage_path.exists():
-        return []
     try:
-        with sqlite3.connect(global_storage_path) as conn:
+        with readonly_connection(global_storage_path) as conn:
+            if conn is None:
+                return []
             cur = conn.cursor()
             try:
                 cur.execute(
@@ -181,24 +180,6 @@ def load_global_composer_headers(global_storage_path: Path) -> List[Dict]:
             row = cur.fetchone()
             if row:
                 return json.loads(row[0]).get("allComposers", [])
-    except Exception:
+    except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError):
         pass
     return []
-
-
-# Tool type mapping for display
-TOOL_TYPES = {
-    1: "🔍 Codebase Search",
-    3: "🔎 Grep Search",
-    5: "📖 Read File",
-    6: "📁 List Directory",
-    7: "✏️ Edit File",
-    8: "🔍 File Search",
-    9: "🔍 Codebase Search",
-    11: "🗑️ Delete File",
-    12: "🔄 Reapply",
-    15: "⚡ Terminal Command",
-    16: "📋 Fetch Rules",
-    18: "🌐 Web Search",
-    19: "🔧 MCP Tool",
-}
