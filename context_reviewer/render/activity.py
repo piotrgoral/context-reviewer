@@ -11,10 +11,11 @@ from context_reviewer.render.terminal import ansi
 
 _MAX_LINE_RANGE_PARTS = 8
 ContextTreeMode = Literal["reads", "edits"]
+ReadSegmentKind = Literal["read", "search"]
 _ANSI_GREEN_READ = "92"
+_ANSI_YELLOW_READ = "93"
 _ANSI_ORANGE = "38;5;208"
-_ICON_SEARCH = "🔍"
-_ICON_CODE_SEARCH = "🔎"
+_ANSI_ORANGE_SEARCH = _ANSI_ORANGE
 _SEGMENT_SEPARATOR = " · "
 
 
@@ -39,6 +40,14 @@ def _read_lines(file_usage: FileContextUsage) -> Set[int]:
     return set(file_usage.lines)
 
 
+def _read_coverage_lines(file_usage: FileContextUsage) -> Set[int]:
+    return set(file_usage.read_lines)
+
+
+def _lines_not_covered(lines: Set[int], coverage: Set[int]) -> Set[int]:
+    return lines - coverage
+
+
 def _format_line_range_detail(
     lines: Set[int],
     *,
@@ -59,43 +68,59 @@ def _format_line_range_detail(
 
 def _read_line_segments(
     file_usage: FileContextUsage,
-) -> List[Tuple[Optional[str], Set[int]]]:
+) -> List[Tuple[ReadSegmentKind, Set[int]]]:
     has_kind_specific = (
         file_usage.read_lines
         or file_usage.search_lines
         or file_usage.code_search_lines
     )
-    if has_kind_specific:
-        segments = [
-            (None, set(file_usage.read_lines)),
-            (_ICON_SEARCH, set(file_usage.search_lines)),
-            (_ICON_CODE_SEARCH, set(file_usage.code_search_lines)),
-        ]
-    else:
-        segments = [(None, set(file_usage.lines))]
-    return [(icon, lines) for icon, lines in segments if lines]
+    if not has_kind_specific:
+        if file_usage.lines:
+            return [("read", set(file_usage.lines))]
+        return []
+
+    coverage = _read_coverage_lines(file_usage)
+    segments: List[Tuple[ReadSegmentKind, Set[int]]] = []
+    if file_usage.read_lines:
+        segments.append(("read", set(file_usage.read_lines)))
+
+    search_lines = _lines_not_covered(
+        set(file_usage.search_lines) | set(file_usage.code_search_lines),
+        coverage,
+    )
+    if search_lines:
+        segments.append(("search", search_lines))
+    return segments
+
+
+def _segment_color(kind: ReadSegmentKind) -> str:
+    if kind == "read":
+        return _ANSI_YELLOW_READ
+    return _ANSI_ORANGE_SEARCH
 
 
 def _join_segment_entries(
-    entries: List[Tuple[Optional[str], str, int]],
+    entries: List[Tuple[ReadSegmentKind, str, int]],
+    *,
+    color: bool = False,
 ) -> str:
     segments: List[str] = []
-    current_icon: Optional[str] = None
+    current_kind: Optional[ReadSegmentKind] = None
     current_parts: List[str] = []
 
     def flush() -> None:
         if not current_parts:
             return
         text = ", ".join(current_parts)
-        if current_icon:
-            text = f"{current_icon} {text}"
+        if color and current_kind is not None:
+            text = ansi(_segment_color(current_kind), text)
         segments.append(text)
 
-    for icon, part, _ in entries:
-        if current_parts and icon != current_icon:
+    for kind, part, _ in entries:
+        if current_parts and kind != current_kind:
             flush()
             current_parts = []
-        current_icon = icon
+        current_kind = kind
         current_parts.append(part)
     flush()
     return _SEGMENT_SEPARATOR.join(segments)
@@ -105,22 +130,23 @@ def _format_read_line_range_detail(
     file_usage: FileContextUsage,
     *,
     max_parts: int = _MAX_LINE_RANGE_PARTS,
+    color: bool = False,
 ) -> str:
     segments = _read_line_segments(file_usage)
-    entries: List[Tuple[Optional[str], str, int]] = []
-    for icon, lines in segments:
+    entries: List[Tuple[ReadSegmentKind, str, int]] = []
+    for kind, lines in segments:
         for part, count in iter_line_range_parts(lines):
-            entries.append((icon, part, count))
+            entries.append((kind, part, count))
 
     if not entries:
         return ""
 
     if len(entries) <= max_parts:
-        return _join_segment_entries(entries)
+        return _join_segment_entries(entries, color=color)
 
     shown = entries[:max_parts]
     extra_lines = sum(count for _, _, count in entries[max_parts:])
-    detail = _join_segment_entries(shown)
+    detail = _join_segment_entries(shown, color=color)
     return f"{detail}, … (+{extra_lines} lines)"
 
 
@@ -243,15 +269,14 @@ def style_read_file_detail(
     if file_usage.full_file:
         detail = "✓"
         if color:
-            return ansi(_ANSI_GREEN_READ, detail)
+            return ansi(_ANSI_YELLOW_READ, detail)
         return detail
 
-    detail = _format_read_line_range_detail(file_usage, max_parts=max_parts)
-    if not detail:
-        return ""
-    if color:
-        return ansi(_ANSI_GREEN_READ, detail)
-    return detail
+    return _format_read_line_range_detail(
+        file_usage,
+        max_parts=max_parts,
+        color=color,
+    )
 
 
 def format_edit_file_detail(

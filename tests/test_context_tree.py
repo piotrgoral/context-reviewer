@@ -1291,7 +1291,8 @@ class TestFormatContextWorktree(unittest.TestCase):
         self.assertIn("\033[1m", output)
         self.assertIn("\033[36m", output)
         self.assertIn("\033[92m", output)
-        self.assertNotIn("\033[33m", output)
+        self.assertIn("\033[93m", output)
+        self.assertNotIn("\033[38;5;208m", output)
         self.assertIn("README.md", output)
         self.assertIn("L1-L2", output)
 
@@ -1375,12 +1376,30 @@ class TestFormatContextWorktree(unittest.TestCase):
             color=True,
         )
         self.assertIn("\033[92m[3 read]\033[0m", output)
-        self.assertIn(
-            "\033[92mL1-L2 · 🔍 L10 · 🔎 L20\x1b[0m",
-            output,
-        )
+        self.assertIn("\033[93mL1-L2\033[0m", output)
+        self.assertIn("\033[38;5;208mL10, L20\033[0m", output)
+        self.assertNotIn("🔍", output)
+        self.assertNotIn("🔎", output)
         self.assertNotIn("search", output.lower())
         self.assertNotIn("code search", output.lower())
+
+    def test_search_lines_hidden_when_covered_by_read(self):
+        output = format_context_tree(
+            {
+                "extractor.py": FileContextUsage(
+                    hits=2,
+                    read_hits=1,
+                    search_hits=1,
+                    read_lines=set(range(1, 195)),
+                    search_lines={7, 8, 21, 200},
+                ),
+            },
+        )
+        self.assertIn("L1-L194", output)
+        self.assertIn("L200", output)
+        self.assertNotIn("L7", output)
+        self.assertNotIn("L21", output)
+        self.assertNotIn("🔍", output)
 
 if __name__ == "__main__":
     unittest.main()
