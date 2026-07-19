@@ -58,7 +58,7 @@ class TestCreateParser(unittest.TestCase):
                 from context_reviewer.cli import main
 
                 main()
-                mock_exit.assert_called_once_with(1)
+                mock_exit.assert_called_once_with(2)
 
 
 class TestResolveUseColor(unittest.TestCase):
@@ -107,7 +107,7 @@ class TestShowContextTree(unittest.TestCase):
     def test_no_projects(self):
         viewer = MagicMock()
         viewer.get_projects.return_value = []
-        output = self._capture_output(show_context_tree, viewer)
+        output = self._capture_output(show_context_tree, viewer, agent="cursor")
         self.assertIn("No projects found", output)
 
     def test_project_not_found(self):
@@ -116,7 +116,7 @@ class TestShowContextTree(unittest.TestCase):
             {"project_name": "other-project", "composers": []}
         ]
         output = self._capture_output(
-            show_context_tree, viewer, project_name="nonexistent"
+            show_context_tree, viewer, project_name="nonexistent", agent="cursor"
         )
         self.assertIn("not found", output)
 
@@ -156,6 +156,7 @@ class TestShowContextTree(unittest.TestCase):
             show_context_tree,
             viewer,
             project_name="test-project",
+            agent="cursor",
         )
         self.assertIn("root", output)
         self.assertIn("app.py [1 read] — L1-L5", output)
@@ -197,6 +198,7 @@ class TestShowContextTree(unittest.TestCase):
             viewer,
             project_name="test-project",
             files_only=True,
+            agent="cursor",
         )
         self.assertIn("root", output)
         self.assertIn("app.py", output)
@@ -226,6 +228,7 @@ class TestShowContextTree(unittest.TestCase):
             viewer,
             project_name="test-project",
             mode="edits",
+            agent="cursor",
         )
         mock_format.assert_called_once()
         self.assertEqual(mock_format.call_args.kwargs["mode"], "edits")
