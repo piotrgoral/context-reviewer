@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+import re
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
 
 ContextReadKind = Literal["read", "search", "code_search"]
 
@@ -60,6 +61,82 @@ _FULL_FILE_KEYS = (
     "should_read_entire_file",
     "readFullFile",
 )
+_PATCH_HUNK_RE = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+    re.MULTILINE,
+)
+_PATCH_CONTENT_KEYS = ("patch", "input", "contents", "unifiedPatch", "diff")
+_MULTIEDIT_KEYS = ("edits", "Edits")
+def _lines_from_range(start_line: int, end_line: int) -> Set[int]:
+    if end_line < start_line:
+        return set()
+    return set(range(start_line, end_line + 1))
+
+
+def _extract_line_range_from_dict(data: Dict[str, Any]) -> Set[int]:
+    start = _first_present(data, _START_KEYS)
+    end = _first_present(data, _END_KEYS)
+    if start is None and end is None:
+        return set()
+    start_line = int(start) if start is not None else 1
+    end_line = int(end) if end is not None else start_line
+    return _lines_from_range(start_line, end_line)
+
+
+def _extract_patch_lines(patch_text: str) -> Set[int]:
+    lines: Set[int] = set()
+    for match in _PATCH_HUNK_RE.finditer(patch_text):
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        if new_count <= 0:
+            lines.add(new_start)
+            continue
+        lines.update(range(new_start, new_start + new_count))
+    return lines
+
+
+def _extract_multiedit_lines(args: Dict[str, Any]) -> Set[int]:
+    edits = None
+    for key in _MULTIEDIT_KEYS:
+        candidate = args.get(key)
+        if isinstance(candidate, list):
+            edits = candidate
+            break
+    if not edits:
+        return set()
+
+    lines: Set[int] = set()
+    for edit in edits:
+        if isinstance(edit, dict):
+            lines.update(_extract_line_range_from_dict(edit))
+    return lines
+
+
+def _extract_edit_line_usage(
+    tool_name: str,
+    args: Dict[str, Any],
+) -> FileContextUsage:
+    usage = FileContextUsage()
+    if tool_name == "delete_file":
+        usage.deleted = True
+        return usage
+    if tool_name == "write":
+        usage.edit_full_file = True
+        return usage
+    if tool_name == "apply_patch":
+        patch_text = _first_present(args, _PATCH_CONTENT_KEYS)
+        if isinstance(patch_text, str):
+            usage.edit_lines.update(_extract_patch_lines(patch_text))
+        return usage
+    if tool_name == "MultiEdit":
+        usage.edit_lines.update(_extract_multiedit_lines(args))
+        return usage
+    if tool_name in {"edit_file_v2", "edit_file"}:
+        usage.edit_lines.update(_extract_line_range_from_dict(args))
+        return usage
+    return usage
+
+
 def is_context_tool(tool_name: Optional[str]) -> bool:
     return tool_name in CONTEXT_TOOL_NAMES
 
@@ -279,7 +356,7 @@ def _edit_was_applied(tool_name: str, result: Dict[str, Any]) -> bool:
 
 def extract_edit_context(
     tool_data: Dict[str, Any],
-) -> Optional[Tuple[str, bool]]:
+) -> Optional[Tuple[str, FileContextUsage]]:
     tool_name = tool_data.get("name")
     if tool_name not in EDIT_TOOL_NAMES:
         return None
@@ -293,16 +370,16 @@ def extract_edit_context(
     if not isinstance(file_path, str) or not file_path:
         return None
 
-    return file_path, tool_name == "delete_file"
+    usage = _extract_edit_line_usage(tool_name, args)
+    return file_path, usage
 
 
 def _merge_edit_usage(
     target: Dict[str, FileContextUsage],
     file_path: str,
+    usage: FileContextUsage,
     project_root: Optional[str],
     bubble_index: int,
-    *,
-    deleted: bool = False,
 ) -> None:
     rel_path = _normalize_path(file_path, project_root)
     if not rel_path:
@@ -326,8 +403,13 @@ def _merge_edit_usage(
             existing.last_edit_bubble_index,
             bubble_index,
         )
-    if deleted:
+    if usage.deleted:
         existing.deleted = True
+    if usage.edit_full_file:
+        existing.edit_full_file = True
+        existing.edit_lines.clear()
+    elif not existing.edit_full_file:
+        existing.edit_lines.update(usage.edit_lines)
 
 
 def _clear_line_sets(usage: FileContextUsage) -> None:
@@ -408,13 +490,13 @@ def collect_context_usage(
         if is_edit_tool(tool_name):
             edit_usage = extract_edit_context(tool_data)
             if edit_usage:
-                file_path, deleted = edit_usage
+                file_path, usage = edit_usage
                 _merge_edit_usage(
                     usage_by_file,
                     file_path,
+                    usage,
                     project_root,
                     bubble_index,
-                    deleted=deleted,
                 )
             continue
 

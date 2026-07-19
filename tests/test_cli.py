@@ -24,6 +24,10 @@ class TestCreateParser(unittest.TestCase):
         )
         self.assertFalse(create_parser().parse_args(["--cursor"]).files_only)
 
+    def test_edits_arg(self):
+        self.assertTrue(create_parser().parse_args(["--cursor", "--edits"]).edits)
+        self.assertFalse(create_parser().parse_args(["--cursor"]).edits)
+
     def test_context_tree_depth_arg(self):
         args = create_parser().parse_args(
             ["--cursor", "--context-tree-depth", "2"]
@@ -196,6 +200,33 @@ class TestShowContextTree(unittest.TestCase):
         self.assertIn("app.py", output)
         self.assertNotIn("L1-L5", output)
         self.assertNotIn(" — ", output)
+
+    @patch("context_reviewer.cli.format_context_tree")
+    def test_edits_mode_passes_mode_to_formatter(self, mock_format):
+        mock_format.return_value = "root"
+        viewer = MagicMock()
+        viewer.get_projects.return_value = [
+            {
+                "project_name": "test-project",
+                "folder_path": "/tmp/project",
+                "composers": [
+                    {
+                        "name": "test-dialog",
+                        "composerId": "abc123",
+                        "lastUpdatedAt": 1000,
+                    }
+                ],
+            }
+        ]
+        viewer.get_dialog_messages.return_value = [{"type": 1, "text": "hello"}]
+        self._capture_output(
+            show_context_tree,
+            viewer,
+            project_name="test-project",
+            mode="edits",
+        )
+        mock_format.assert_called_once()
+        self.assertEqual(mock_format.call_args.kwargs["mode"], "edits")
 
 
 if __name__ == "__main__":

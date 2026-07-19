@@ -381,7 +381,7 @@ class TestCollectContextUsage(unittest.TestCase):
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         output = format_context_tree(usage, total_bubbles=len(messages))
         self.assertIn("pyproject.toml [1 read] [· · ·    ] — L1-L30", output)
-        self.assertIn("README.md [1 search] [· · · · ·] —", output)
+        self.assertIn("README.md [1 read] [· · · · ·] —", output)
         for line in (35, 36, 498, 646, 647, 727, 770):
             self.assertIn(f"L{line}", output)
         self.assertNotIn("glob_file_search", output)
@@ -594,10 +594,11 @@ class TestExtractEditContext(unittest.TestCase):
             "result": {"isApplied": True},
         }
         result = extract_edit_context(tool_data)
-        self.assertEqual(
-            result,
-            (f"{PROJECT_ROOT}/cursor_chronicle/cli.py", False),
-        )
+        self.assertIsNotNone(result)
+        file_path, usage = result
+        self.assertEqual(file_path, f"{PROJECT_ROOT}/cursor_chronicle/cli.py")
+        self.assertFalse(usage.deleted)
+        self.assertEqual(usage.edit_lines, set())
 
     def test_skips_rejected_write(self):
         tool_data = {
@@ -616,7 +617,10 @@ class TestExtractEditContext(unittest.TestCase):
             "result": {"afterContentId": "abc"},
         }
         result = extract_edit_context(tool_data)
-        self.assertEqual(result, (f"{PROJECT_ROOT}/module.py", False))
+        self.assertIsNotNone(result)
+        file_path, usage = result
+        self.assertEqual(file_path, f"{PROJECT_ROOT}/module.py")
+        self.assertFalse(usage.deleted)
 
     def test_delete_file(self):
         tool_data = {
@@ -626,7 +630,69 @@ class TestExtractEditContext(unittest.TestCase):
             "result": {"fileDeletedSuccessfully": True},
         }
         result = extract_edit_context(tool_data)
-        self.assertEqual(result, (f"{PROJECT_ROOT}/old.py", True))
+        self.assertIsNotNone(result)
+        file_path, usage = result
+        self.assertEqual(file_path, f"{PROJECT_ROOT}/old.py")
+        self.assertTrue(usage.deleted)
+
+    def test_edit_file_v2_line_range(self):
+        tool_data = {
+            "name": "edit_file_v2",
+            "status": "completed",
+            "rawArgs": {
+                "path": f"{PROJECT_ROOT}/module.py",
+                "start_line_one_indexed": 10,
+                "end_line_one_indexed_inclusive": 15,
+            },
+            "result": {"afterContentId": "abc"},
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, set(range(10, 16)))
+
+    def test_write_marks_full_file(self):
+        tool_data = {
+            "name": "write",
+            "status": "completed",
+            "rawArgs": {"file_path": f"{PROJECT_ROOT}/new.py"},
+            "result": {"rejected": False},
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertTrue(usage.edit_full_file)
+
+    def test_apply_patch_extracts_lines(self):
+        tool_data = {
+            "name": "apply_patch",
+            "status": "completed",
+            "rawArgs": {
+                "path": f"{PROJECT_ROOT}/patched.py",
+                "patch": "@@ -10,3 +10,4 @@\n context\n-old\n+new\n",
+            },
+            "result": {"isApplied": True},
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, {10, 11, 12, 13})
+
+    def test_multiedit_extracts_lines(self):
+        tool_data = {
+            "name": "MultiEdit",
+            "status": "completed",
+            "rawArgs": {
+                "path": f"{PROJECT_ROOT}/multi.py",
+                "edits": [
+                    {
+                        "start_line_one_indexed": 5,
+                        "end_line_one_indexed_inclusive": 7,
+                    },
+                    {
+                        "start_line_one_indexed": 20,
+                        "end_line_one_indexed_inclusive": 20,
+                    },
+                ],
+            },
+            "result": {"isApplied": True},
+        }
+        _, usage = extract_edit_context(tool_data)
+        self.assertEqual(usage.edit_lines, set(range(5, 8)) | {20})
 
 class TestCollectEditUsage(unittest.TestCase):
     def test_collects_edits_and_reads_on_same_file(self):
@@ -682,11 +748,21 @@ class TestCollectEditUsage(unittest.TestCase):
 
         output = format_context_tree(usage, total_bubbles=len(messages))
         self.assertIn(
-            "cli.py [1 read] [·        ] [3 edits] [· · · · ·] — L1-L10",
+            "cli.py [1 read] [·        ] — L1-L10",
             output,
         )
+        edit_output = format_context_tree(
+            usage,
+            mode="edits",
+            total_bubbles=len(messages),
+        )
+        self.assertIn(
+            "cli.py [3 edits] [· · · · ·] — edited",
+            edit_output,
+        )
+        self.assertNotIn("[1 read]", edit_output)
 
-    def test_edit_only_file_appears_in_tree(self):
+    def test_edit_only_file_hidden_in_reads_mode(self):
         messages = [
             {
                 "type": 2,
@@ -700,7 +776,23 @@ class TestCollectEditUsage(unittest.TestCase):
         ]
         usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
         output = format_context_tree(usage, total_bubbles=5)
-        self.assertIn("new.py [1 edit] [·        ] — edited", output)
+        self.assertNotIn("new.py", output)
+
+    def test_edit_only_file_appears_in_edits_mode(self):
+        messages = [
+            {
+                "type": 2,
+                "tool_data": {
+                    "name": "write",
+                    "status": "completed",
+                    "rawArgs": {"file_path": f"{PROJECT_ROOT}/new.py"},
+                    "result": {"rejected": False},
+                },
+            },
+        ]
+        usage = collect_context_usage(messages, project_root=PROJECT_ROOT)
+        output = format_context_tree(usage, mode="edits", total_bubbles=5)
+        self.assertIn("new.py [1 edit] [·        ] — ✓", output)
 
     def test_skips_failed_edits(self):
         messages = [
@@ -759,7 +851,7 @@ class TestFormatContextWorktree(unittest.TestCase):
         self.assertIn("early.py [1 read] [·        ] — L1", output)
         self.assertIn("late.py [1 read] [· · · · ·] — ✓", output)
 
-    def test_tree_shows_read_and_edit_activity(self):
+    def test_tree_shows_read_activity_only_in_reads_mode(self):
 
         output = format_context_tree(
             {
@@ -774,9 +866,32 @@ class TestFormatContextWorktree(unittest.TestCase):
             total_bubbles=10,
         )
         self.assertIn(
-            "cli.py [6 read] [· ·      ] [3 edits] [· · · · ·] — L1-L10",
+            "cli.py [6 read] [· ·      ] — L1-L10",
             output,
         )
+        self.assertNotIn("[3 edits]", output)
+
+    def test_tree_shows_edit_activity_only_in_edits_mode(self):
+
+        output = format_context_tree(
+            {
+                "cli.py": FileContextUsage(
+                    lines=set(range(1, 11)),
+                    hits=6,
+                    last_bubble_index=2,
+                    edit_hits=3,
+                    edit_lines={42, 43, 44},
+                    last_edit_bubble_index=8,
+                ),
+            },
+            mode="edits",
+            total_bubbles=10,
+        )
+        self.assertIn(
+            "cli.py [3 edits] [· · · · ·] — L42-L44",
+            output,
+        )
+        self.assertNotIn("[6 read]", output)
 
     def test_tree_glyphs_and_nesting(self):
 
@@ -952,27 +1067,38 @@ class TestFormatContextWorktree(unittest.TestCase):
         )
         self.assertIn("README.md [2 read] [· · · · ·] — L1-L2", output)
 
-    def test_color_output_includes_ansi_codes(self):
+    def test_color_output_includes_ansi_codes_for_reads(self):
 
         output = format_context_tree(
             {
                 "README.md": FileContextUsage(lines={1, 2}, hits=2),
-                "cursor_chronicle/cli.py": FileContextUsage(
-                    full_file=True,
-                    edit_hits=1,
-                    last_edit_bubble_index=0,
-                ),
+                "cursor_chronicle/cli.py": FileContextUsage(full_file=True, hits=1),
             },
             total_bubbles=2,
             color=True,
         )
         self.assertIn("\033[1m", output)
         self.assertIn("\033[36m", output)
-        self.assertIn("\033[38;5;208m", output)
         self.assertIn("\033[92m", output)
         self.assertNotIn("\033[33m", output)
         self.assertIn("README.md", output)
         self.assertIn("L1-L2", output)
+
+    def test_color_output_includes_ansi_codes_for_edits(self):
+
+        output = format_context_tree(
+            {
+                "cursor_chronicle/cli.py": FileContextUsage(
+                    edit_hits=1,
+                    edit_full_file=True,
+                    last_edit_bubble_index=0,
+                ),
+            },
+            mode="edits",
+            total_bubbles=2,
+            color=True,
+        )
+        self.assertIn("\033[38;5;208m", output)
         self.assertIn("[1 edit]", output)
         self.assertIn("✓", output)
 
@@ -1021,36 +1147,26 @@ class TestFormatContextWorktree(unittest.TestCase):
         self.assertEqual(usage["file.py"].read_hits, 2)
         self.assertEqual(usage["file.py"].last_bubble_index, 1)
 
-    def test_color_uses_distinct_greens_per_read_type(self):
+    def test_unified_read_count_and_lines(self):
         output = format_context_tree(
             {
-                "read.py": FileContextUsage(
-                    lines={1, 2},
-                    hits=1,
+                "mixed.py": FileContextUsage(
+                    lines={1, 2, 10, 20},
+                    hits=3,
                     read_hits=1,
                     read_lines={1, 2},
-                ),
-                "search.py": FileContextUsage(
-                    lines={10},
-                    hits=1,
                     search_hits=1,
                     search_lines={10},
-                ),
-                "semantic.py": FileContextUsage(
-                    lines={20},
-                    hits=1,
                     code_search_hits=1,
                     code_search_lines={20},
                 ),
             },
             color=True,
         )
-        self.assertIn("\033[92m[1 read]\033[0m", output)
-        self.assertIn("\033[32m[1 search]\033[0m", output)
-        self.assertIn("\033[38;5;77m[1 code search]\033[0m", output)
-        self.assertIn("\033[92mL1-L2\033[0m", output)
-        self.assertIn("\033[32mL10\033[0m", output)
-        self.assertIn("\033[38;5;77mL20\033[0m", output)
+        self.assertIn("\033[92m[3 read]\033[0m", output)
+        self.assertIn("\033[92mL1-L2, L10, L20\x1b[0m", output)
+        self.assertNotIn("search", output)
+        self.assertNotIn("code search", output)
 
 if __name__ == "__main__":
     unittest.main()

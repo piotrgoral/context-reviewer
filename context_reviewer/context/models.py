@@ -19,6 +19,8 @@ class FileContextUsage:
     code_search_hits: int = 0
     last_bubble_index: Optional[int] = None
     edit_hits: int = 0
+    edit_lines: Set[int] = field(default_factory=set)
+    edit_full_file: bool = False
     last_edit_bubble_index: Optional[int] = None
     deleted: bool = False
 

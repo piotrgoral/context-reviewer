@@ -6,7 +6,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
 from context_reviewer.context.models import FileContextUsage
-from context_reviewer.render.activity import format_file_detail, style_activity_suffix, style_file_detail
+from context_reviewer.render.activity import (
+    ContextTreeMode,
+    format_file_detail,
+    has_edit_activity,
+    has_mode_detail,
+    has_read_activity,
+    style_activity_suffix,
+    style_file_detail,
+)
 from context_reviewer.render.terminal import ansi, style_tree_prefix
 
 
@@ -43,9 +51,29 @@ def _format_truncation_hint(hidden_count: int, *, color: bool = False) -> str:
     return hint
 
 
+def _has_mode_activity(file_usage: FileContextUsage, mode: ContextTreeMode) -> bool:
+    if mode == "edits":
+        return has_edit_activity(file_usage)
+    return has_read_activity(file_usage)
+
+
+def _is_renderable(
+    file_usage: FileContextUsage,
+    *,
+    mode: ContextTreeMode = "reads",
+    files_only: bool = False,
+) -> bool:
+    if not _has_mode_activity(file_usage, mode):
+        return False
+    if files_only:
+        return True
+    return has_mode_detail(file_usage, mode=mode)
+
+
 def _count_renderable_subtree(
     node: _ContextTreeNode,
     *,
+    mode: ContextTreeMode = "reads",
     files_only: bool = False,
 ) -> int:
     count = 0
@@ -54,11 +82,12 @@ def _count_renderable_subtree(
             count += 1
             count += _count_renderable_subtree(
                 node.subdirs[name],
+                mode=mode,
                 files_only=files_only,
             )
         if name in node.files:
             file_usage = node.files[name]
-            if files_only or format_file_detail(file_usage):
+            if _is_renderable(file_usage, mode=mode, files_only=files_only):
                 count += 1
     return count
 
@@ -94,6 +123,7 @@ def _render_context_tree(
     ancestors_last: List[bool],
     lines: List[str],
     *,
+    mode: ContextTreeMode = "reads",
     files_only: bool = False,
     total_bubbles: int = 0,
     recency_bubble_offset: int = 0,
@@ -114,7 +144,11 @@ def _render_context_tree(
         if isinstance(value, _ContextTreeNode):
             truncation_hint = ""
             if max_depth is not None and depth >= max_depth:
-                hidden_count = _count_renderable_subtree(value, files_only=files_only)
+                hidden_count = _count_renderable_subtree(
+                    value,
+                    mode=mode,
+                    files_only=files_only,
+                )
                 if hidden_count > 0:
                     truncation_hint = _format_truncation_hint(
                         hidden_count,
@@ -138,6 +172,7 @@ def _render_context_tree(
                 value,
                 ancestors_last + [is_last],
                 lines,
+                mode=mode,
                 files_only=files_only,
                 total_bubbles=total_bubbles,
                 recency_bubble_offset=recency_bubble_offset,
@@ -147,9 +182,13 @@ def _render_context_tree(
             )
             continue
 
+        if not _is_renderable(value, mode=mode, files_only=files_only):
+            continue
+
         activity_suffix = style_activity_suffix(
             value,
             total_bubbles,
+            mode=mode,
             color=color,
             recency_bubble_offset=recency_bubble_offset,
         )
@@ -166,9 +205,9 @@ def _render_context_tree(
             continue
 
         if color:
-            detail = style_file_detail(value, color=True)
+            detail = style_file_detail(value, mode=mode, color=True)
         else:
-            detail = format_file_detail(value)
+            detail = format_file_detail(value, mode=mode)
         if not detail:
             continue
         lines.append(
@@ -187,6 +226,7 @@ def format_context_tree(
     usage: Dict[str, FileContextUsage],
     root_label: str = "root",
     *,
+    mode: ContextTreeMode = "reads",
     files_only: bool = False,
     total_bubbles: int = 0,
     recency_bubble_offset: int = 0,
@@ -212,6 +252,7 @@ def format_context_tree(
         tree,
         [],
         rendered,
+        mode=mode,
         files_only=files_only,
         total_bubbles=total_bubbles,
         recency_bubble_offset=recency_bubble_offset,

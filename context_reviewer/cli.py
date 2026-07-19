@@ -59,6 +59,8 @@ def show_context_tree(
     viewer: CursorChatViewer,
     project_name: Optional[str] = None,
     dialog_name: Optional[str] = None,
+    *,
+    mode: str = "reads",
     files_only: bool = False,
     context_tree_depth: Optional[int] = None,
     last_turn: bool = False,
@@ -123,6 +125,7 @@ def show_context_tree(
         print(
             format_context_tree(
                 tree.usage,
+                mode=mode,
                 files_only=files_only,
                 total_bubbles=tree.total_bubbles,
                 recency_bubble_offset=tree.recency_bubble_offset,
@@ -149,6 +152,7 @@ Examples:
   %(prog)s --cursor --list-all --desc            # List all dialogs (newest first)
   %(prog)s --cursor -p myproject -d "my chat"    # Show context tree for dialog
   %(prog)s --cursor -p myproject -d "my chat" --files-only
+  %(prog)s --cursor -p myproject -d "my chat" --edits
   %(prog)s --cursor -p myproject -d "my chat" --last-turn --context-tree-depth 2
         """,
     )
@@ -189,6 +193,11 @@ Examples:
         "--files-only",
         action="store_true",
         help="List files only (omit line ranges and checkmarks)",
+    )
+    parser.add_argument(
+        "--edits",
+        action="store_true",
+        help="Show edits view instead of reads (edit counts and edited line ranges)",
     )
     parser.add_argument(
         "--context-tree-depth",
@@ -254,6 +263,7 @@ def main():
             viewer,
             args.project,
             args.dialog,
+            mode="edits" if args.edits else "reads",
             files_only=args.files_only,
             context_tree_depth=args.context_tree_depth,
             last_turn=args.last_turn,
