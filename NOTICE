@@ -1,0 +1,13 @@
+context-reviewer
+
+This project includes code derived from cursor-chronicle (main branch only)
+https://github.com/cursor-chronicle/cursor-chronicle
+
+Based on commit: 8dfa2bb1f79439c6580e964b76d4cd81cf1a9d61
+
+Files copied from upstream (AGPL-3.0):
+- context_reviewer/agents/cursor/messages.py
+- context_reviewer/agents/cursor/utils.py
+- context_reviewer/agents/cursor/viewer.py (slimmed: project/dialog access only)
+
+Licensed under GNU Affero General Public License v3 (AGPL-3.0) as a combined work.
