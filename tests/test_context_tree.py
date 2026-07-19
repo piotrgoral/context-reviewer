@@ -1164,9 +1164,12 @@ class TestFormatContextWorktree(unittest.TestCase):
             color=True,
         )
         self.assertIn("\033[92m[3 read]\033[0m", output)
-        self.assertIn("\033[92mL1-L2, L10, L20\x1b[0m", output)
-        self.assertNotIn("search", output)
-        self.assertNotIn("code search", output)
+        self.assertIn(
+            "\033[92mL1-L2 · 🔍 L10 · 🔎 L20\x1b[0m",
+            output,
+        )
+        self.assertNotIn("search", output.lower())
+        self.assertNotIn("code search", output.lower())
 
 if __name__ == "__main__":
     unittest.main()

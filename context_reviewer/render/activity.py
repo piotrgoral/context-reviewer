@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Set
+from typing import List, Literal, Optional, Set, Tuple
 
 from context_reviewer.context.models import FileContextUsage
 from context_reviewer.render.lines import iter_line_range_parts
@@ -13,6 +13,9 @@ _MAX_LINE_RANGE_PARTS = 8
 ContextTreeMode = Literal["reads", "edits"]
 _ANSI_GREEN_READ = "92"
 _ANSI_ORANGE = "38;5;208"
+_ICON_SEARCH = "🔍"
+_ICON_CODE_SEARCH = "🔎"
+_SEGMENT_SEPARATOR = " · "
 
 
 def _total_read_hits(file_usage: FileContextUsage) -> int:
@@ -52,6 +55,73 @@ def _format_line_range_detail(
     extra_lines = sum(count for _, count in parts_and_counts[max_parts:])
     shown_text = ", ".join(part for part, _ in shown)
     return f"{shown_text}, … (+{extra_lines} lines)"
+
+
+def _read_line_segments(
+    file_usage: FileContextUsage,
+) -> List[Tuple[Optional[str], Set[int]]]:
+    has_kind_specific = (
+        file_usage.read_lines
+        or file_usage.search_lines
+        or file_usage.code_search_lines
+    )
+    if has_kind_specific:
+        segments = [
+            (None, set(file_usage.read_lines)),
+            (_ICON_SEARCH, set(file_usage.search_lines)),
+            (_ICON_CODE_SEARCH, set(file_usage.code_search_lines)),
+        ]
+    else:
+        segments = [(None, set(file_usage.lines))]
+    return [(icon, lines) for icon, lines in segments if lines]
+
+
+def _join_segment_entries(
+    entries: List[Tuple[Optional[str], str, int]],
+) -> str:
+    segments: List[str] = []
+    current_icon: Optional[str] = None
+    current_parts: List[str] = []
+
+    def flush() -> None:
+        if not current_parts:
+            return
+        text = ", ".join(current_parts)
+        if current_icon:
+            text = f"{current_icon} {text}"
+        segments.append(text)
+
+    for icon, part, _ in entries:
+        if current_parts and icon != current_icon:
+            flush()
+            current_parts = []
+        current_icon = icon
+        current_parts.append(part)
+    flush()
+    return _SEGMENT_SEPARATOR.join(segments)
+
+
+def _format_read_line_range_detail(
+    file_usage: FileContextUsage,
+    *,
+    max_parts: int = _MAX_LINE_RANGE_PARTS,
+) -> str:
+    segments = _read_line_segments(file_usage)
+    entries: List[Tuple[Optional[str], str, int]] = []
+    for icon, lines in segments:
+        for part, count in iter_line_range_parts(lines):
+            entries.append((icon, part, count))
+
+    if not entries:
+        return ""
+
+    if len(entries) <= max_parts:
+        return _join_segment_entries(entries)
+
+    shown = entries[:max_parts]
+    extra_lines = sum(count for _, _, count in entries[max_parts:])
+    detail = _join_segment_entries(shown)
+    return f"{detail}, … (+{extra_lines} lines)"
 
 
 def format_read_activity_suffix(
@@ -176,8 +246,7 @@ def style_read_file_detail(
             return ansi(_ANSI_GREEN_READ, detail)
         return detail
 
-    lines = _read_lines(file_usage)
-    detail = _format_line_range_detail(lines, max_parts=max_parts)
+    detail = _format_read_line_range_detail(file_usage, max_parts=max_parts)
     if not detail:
         return ""
     if color:
